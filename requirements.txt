@@ -1,0 +1,13 @@
+# 认知记忆模块 - 核心依赖
+pydantic>=2.0
+
+# 加密（生产环境）
+cryptography>=41.0
+
+# 测试
+pytest>=7.0
+pytest-asyncio>=0.21
+
+# 可选：生产环境高性能存储
+# redis>=4.5
+# psycopg2-binary>=2.9

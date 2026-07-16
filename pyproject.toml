@@ -1,0 +1,29 @@
+[project]
+name = "cognitive-memory"
+version = "1.0.0"
+description = "智能座舱Agent认知记忆模块 - 处理、存储和检索用户相关信息，支持个性化交互和上下文感知"
+authors = [
+    {name = "Intelligent Cockpit Team"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+]
+prod = [
+    "cryptography>=41.0",
+    "redis>=4.5",
+    "psycopg2-binary>=2.9",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["cognitive_memory/tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]
