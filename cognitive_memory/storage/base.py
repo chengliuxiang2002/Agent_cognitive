@@ -100,6 +100,11 @@ class BaseInteractionStore(ABC):
         """获取指定会话的所有交互"""
         ...
 
+    @abstractmethod
+    async def delete(self, record_id: str) -> bool:
+        """删除指定的交互记录"""
+        ...
+
 
 class BasePatternStore(ABC):
     """行为模式存储抽象基类"""
@@ -121,4 +126,9 @@ class BasePatternStore(ABC):
         self, user_id: str, pattern_name: str
     ) -> Optional[BehaviorPattern]:
         """根据名称获取特定模式"""
+        ...
+
+    @abstractmethod
+    async def delete_pattern(self, pattern_id: str) -> bool:
+        """删除指定的行为模式"""
         ...

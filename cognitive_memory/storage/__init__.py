@@ -10,6 +10,7 @@ from .long_term import (
     ProfileStore,
     InteractionStore,
     PatternStore,
+    FeedbackStore,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "ProfileStore",
     "InteractionStore",
     "PatternStore",
+    "FeedbackStore",
 ]

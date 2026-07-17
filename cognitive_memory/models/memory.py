@@ -209,6 +209,11 @@ class SceneContext:
     timestamp: datetime = field(default_factory=datetime.now)
     time_of_day: str = ""            # "morning", "afternoon", "evening", "night"
 
+    def __post_init__(self):
+        """反序列化时确保 timestamp 为 datetime 类型"""
+        if isinstance(self.timestamp, str):
+            self.timestamp = datetime.fromisoformat(self.timestamp)
+
     # 位置
     latitude: float = 0.0
     longitude: float = 0.0

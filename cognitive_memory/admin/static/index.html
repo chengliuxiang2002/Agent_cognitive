@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>认知记忆管理控制台</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.6/dist/vis-network.min.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/vis-network@9.1.6/dist/vis-network.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="header">
+    <h1>认知记忆管理控制台</h1>
+    <div class="header-controls">
+      <span id="systemStatus" class="status-badge status-running">运行中</span>
+      <button id="refreshBtn" class="btn btn-primary">手动刷新</button>
+      <span id="lastUpdate" class="update-time">--</span>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- 左侧导航 -->
+    <nav class="sidebar">
+      <ul>
+        <li class="active" data-panel="dashboard"><span class="icon">📊</span> 仪表盘</li>
+        <li data-panel="graph"><span class="icon">🔗</span> 记忆图谱</li>
+        <li data-panel="radar"><span class="icon">🎯</span> 用户画像</li>
+        <li data-panel="heatmap"><span class="icon">🔥</span> 行为热力图</li>
+        <li data-panel="monitor"><span class="icon">🖥️</span> 系统监控</li>
+      </ul>
+    </nav>
+
+    <!-- 主内容区 -->
+    <main class="main-content">
+      <!-- 仪表盘面板 -->
+      <section id="panel-dashboard" class="panel active">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-value" id="statFeedback">--</div>
+            <div class="stat-label">30天反馈总数</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="statLikeRate">--</div>
+            <div class="stat-label">好评率</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="statSTMem">--</div>
+            <div class="stat-label">短期记忆数</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="statCPU">--</div>
+            <div class="stat-label">CPU 使用率</div>
+          </div>
+        </div>
+        <div class="chart-row">
+          <div class="chart-card">
+            <h3>系统资源趋势</h3>
+            <canvas id="chartResources"></canvas>
+          </div>
+          <div class="chart-card">
+            <h3>反馈趋势</h3>
+            <canvas id="chartFeedback"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- 记忆图谱面板 -->
+      <section id="panel-graph" class="panel">
+        <div class="panel-toolbar">
+          <input type="text" id="graphUserId" placeholder="用户ID (留空显示全部)" class="input">
+          <button id="graphLoadBtn" class="btn btn-primary">加载图谱</button>
+          <span class="hint">支持 1000+ 节点流畅渲染 | 点击节点查看详情 | 滚轮缩放</span>
+        </div>
+        <div id="graphContainer" class="graph-container"></div>
+      </section>
+
+      <!-- 用户画像面板 -->
+      <section id="panel-radar" class="panel">
+        <div class="panel-toolbar">
+          <input type="text" id="radarUserId" placeholder="输入用户ID" class="input">
+          <button id="radarLoadBtn" class="btn btn-primary">加载画像</button>
+        </div>
+        <div class="chart-card">
+          <canvas id="chartRadar"></canvas>
+        </div>
+      </section>
+
+      <!-- 行为热力图面板 -->
+      <section id="panel-heatmap" class="panel">
+        <div class="panel-toolbar">
+          <input type="text" id="heatmapUserId" placeholder="输入用户ID" class="input">
+          <button id="heatmapLoadBtn" class="btn btn-primary">加载热力图</button>
+        </div>
+        <div class="chart-card">
+          <canvas id="chartHeatmap"></canvas>
+        </div>
+      </section>
+
+      <!-- 系统监控面板 -->
+      <section id="panel-monitor" class="panel">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-value" id="monCPU">--</div>
+            <div class="stat-label">CPU</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="monMem">--</div>
+            <div class="stat-label">内存</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="monDisk">--</div>
+            <div class="stat-label">磁盘</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="monUptime">--</div>
+            <div class="stat-label">运行时间</div>
+          </div>
+        </div>
+        <div class="chart-row">
+          <div class="chart-card">
+            <h3>短期记忆使用率</h3>
+            <div class="progress-bar">
+              <div id="memUsageBar" class="progress-fill" style="width:0%"></div>
+            </div>
+            <p id="memUsageText" class="progress-text">-- / --</p>
+          </div>
+          <div class="chart-card">
+            <h3>任务进度</h3>
+            <div id="taskList" class="task-list">
+              <p class="empty-hint">暂无运行任务</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

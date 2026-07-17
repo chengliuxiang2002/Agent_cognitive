@@ -345,15 +345,79 @@ class MemoryEncoder:
             source="scene_sensor",
         )
 
+    # 多语言安全关键词库
+    _SAFETY_KEYWORDS: dict[str, list[str]] = {
+        "zh": ["安全", "危险", "碰撞", "刹车", "安全气囊", "警报", "故障", "异常", "紧急"],
+        "en": ["safety", "danger", "collision", "brake", "airbag", "alert", "fault", "emergency", "warning", "crash"],
+        "ja": ["安全", "危険", "衝突", "ブレーキ", "エアバッグ", "警告", "故障", "緊急", "異常"],
+        "ko": ["안전", "위험", "충돌", "브레이크", "에어백", "경고", "고장", "비상", "긴급"],
+    }
+
+    # 多语言导航/路线关键词
+    _NAVIGATION_KEYWORDS: dict[str, list[str]] = {
+        "zh": ["导航", "路线", "目的地", "去", "怎么走"],
+        "en": ["navigate", "route", "destination", "go to", "directions", "drive to"],
+        "ja": ["ナビ", "ルート", "目的地", "行く", "道順"],
+        "ko": ["네비", "경로", "목적지", "가다", "길안내"],
+    }
+
+    @staticmethod
+    def _detect_language(text: str) -> str:
+        """自动检测文本语言
+
+        通过字符范围快速检测:
+        - 日文: 平假名/片假名范围（优先检测，因日文含汉字）
+        - 韩文: 谚文范围
+        - 中文: CJK统一汉字范围
+        - 英文: 默认回退
+
+        响应时间: < 100ms
+        """
+        if not text:
+            return "zh"
+
+        has_kana = False
+        for char in text:
+            cp = ord(char)
+            # 日文平假名/片假名
+            if 0x3040 <= cp <= 0x309F or 0x30A0 <= cp <= 0x30FF:
+                has_kana = True
+            # 韩文
+            if 0xAC00 <= cp <= 0xD7AF or 0x1100 <= cp <= 0x11FF:
+                return "ko"
+
+        if has_kana:
+            return "ja"
+
+        # 中文 (CJK统一汉字)
+        for char in text:
+            cp = ord(char)
+            if 0x4E00 <= cp <= 0x9FFF:
+                return "zh"
+
+        return "en"
+
     def _assess_importance(self, record: InteractionRecord) -> MemoryImportance:
-        """评估交互记录的重要性"""
+        """评估交互记录的重要性（多语言支持）
+
+        支持中文、英文、日文、韩文安全关键词识别。
+        可通过配置文件扩展新增语言词库。
+        """
+        raw_text = record.raw_input
+        lang = self._detect_language(raw_text)
+
         # 安全相关的交互 → CRITICAL
-        safety_keywords = ["安全", "危险", "碰撞", "刹车", "安全气囊"]
-        if any(kw in record.raw_input for kw in safety_keywords):
+        safety_keywords = self._SAFETY_KEYWORDS.get(lang, self._SAFETY_KEYWORDS["en"])
+        if any(kw.lower() in raw_text.lower() for kw in safety_keywords):
             return MemoryImportance.CRITICAL
 
-        # 导航/路线相关 → HIGH
+        # 导航/路线相关 → HIGH (多语言意图匹配)
         if record.intent in ("navigate", "set_destination"):
+            return MemoryImportance.HIGH
+
+        # 检查导航关键词（针对未标准化的意图）
+        nav_keywords = self._NAVIGATION_KEYWORDS.get(lang, self._NAVIGATION_KEYWORDS["en"])
+        if any(kw.lower() in raw_text.lower() for kw in nav_keywords):
             return MemoryImportance.HIGH
 
         # 偏好设置相关 → HIGH

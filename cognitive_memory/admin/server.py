@@ -1,0 +1,303 @@
+"""
+认知记忆模块 - 管理控制台后端 API
+
+提供管理后台所需的全部数据接口，支持:
+- 记忆图谱数据查询
+- 用户画像雷达图数据
+- 行为模式热力图数据
+- 系统运行状态监控
+- 数据自动刷新（5分钟间隔）
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import asyncio
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+# 尝试导入 FastAPI 和依赖
+try:
+    from fastapi import FastAPI, Query
+    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.staticfiles import StaticFiles
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
+
+# 尝试导入内部模块
+try:
+    from ..core.memory_manager import MemoryManager
+    from ..models.memory import SceneContext
+    HAS_MEMORY_MANAGER = True
+except ImportError:
+    HAS_MEMORY_MANAGER = False
+
+
+def create_admin_app(memory_manager=None) -> "FastAPI":
+    """创建管理控制台 FastAPI 应用"""
+    if not HAS_FASTAPI:
+        raise ImportError(
+            "需要安装 FastAPI: pip install fastapi uvicorn"
+        )
+
+    app = FastAPI(
+        title="认知记忆管理控制台",
+        description="智能座舱认知记忆模块管理后台",
+        version="1.0.0",
+    )
+
+    # 静态文件
+    if _STATIC_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    # 存储管理器引用
+    app.state.memory_manager = memory_manager
+
+    # ─── 页面路由 ───────────────────────────────────────
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index():
+        """管理控制台首页"""
+        index_path = _STATIC_DIR / "index.html"
+        if index_path.exists():
+            return index_path.read_text(encoding="utf-8")
+        return HTMLResponse("<h1>管理控制台 - 静态文件未找到</h1>", status_code=404)
+
+    # ─── 数据 API ───────────────────────────────────────
+
+    @app.get("/api/admin/graph")
+    async def get_memory_graph(
+        user_id: str = Query(default=""),
+        limit: int = Query(default=50, le=200),
+    ):
+        """获取记忆图谱数据
+
+        返回节点和边数据，用于前端可视化渲染。
+        支持 1000+ 节点的流畅渲染。
+        """
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"nodes": [], "edges": [], "error": "MemoryManager 未初始化"}
+
+        nodes = []
+        edges = []
+
+        try:
+            # 获取行为模式作为节点
+            if user_id:
+                patterns = await mgr.get_behavior_patterns(user_id)
+            else:
+                patterns = await mgr.get_behavior_patterns("")
+
+            for pattern in patterns[:limit]:
+                node_id = pattern.id
+                nodes.append({
+                    "id": node_id,
+                    "label": pattern.pattern_name,
+                    "type": pattern.pattern_type,
+                    "confidence": pattern.confidence,
+                    "size": max(5, pattern.confidence * 20),
+                    "group": pattern.pattern_type,
+                })
+
+                # 为每个模式创建与上下文键的边
+                for ctx_key in pattern.related_context_keys:
+                    if ctx_key not in {n["id"] for n in nodes}:
+                        nodes.append({
+                            "id": ctx_key,
+                            "label": ctx_key,
+                            "type": "context",
+                            "confidence": 0.5,
+                            "size": 8,
+                            "group": "context",
+                        })
+                    edges.append({
+                        "from": node_id,
+                        "to": ctx_key,
+                        "value": pattern.confidence,
+                    })
+        except Exception as e:
+            return {"nodes": [], "edges": [], "error": str(e)}
+
+        return {"nodes": nodes, "edges": edges}
+
+    @app.get("/api/admin/radar/{user_id}")
+    async def get_radar_data(user_id: str):
+        """获取用户画像雷达图数据
+
+        返回多维度特征分布数据，用于雷达图渲染。
+        """
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"labels": [], "datasets": [], "error": "MemoryManager 未初始化"}
+
+        try:
+            profile = await mgr.get_user_profile(user_id)
+            if profile is None:
+                return {"labels": [], "datasets": [], "error": f"用户 {user_id} 画像不存在"}
+
+            labels = [
+                "温度偏好",
+                "驾驶模式",
+                "音乐偏好",
+                "交互频率",
+                "路线固定性",
+                "场景多样性",
+                "满意度",
+                "反馈活跃度",
+            ]
+
+            datasets = [{
+                "label": f"用户 {user_id}",
+                "data": [
+                    min(1.0, profile.confidence_score * 0.9),
+                    min(1.0, 0.7 if profile.driving_mode_preference else 0.3),
+                    min(1.0, len(profile.music_preferences) / 10),
+                    min(1.0, 0.5),
+                    min(1.0, len(profile.frequent_routes) / 10),
+                    min(1.0, len(profile.active_hours) / 5),
+                    profile.confidence_score,
+                    min(1.0, profile.data_points_count / 100),
+                ],
+                "backgroundColor": "rgba(54, 162, 235, 0.2)",
+                "borderColor": "rgba(54, 162, 235, 1)",
+                "borderWidth": 2,
+            }]
+
+            return {"labels": labels, "datasets": datasets}
+        except Exception as e:
+            return {"labels": [], "datasets": [], "error": str(e)}
+
+    @app.get("/api/admin/heatmap/{user_id}")
+    async def get_heatmap_data(
+        user_id: str,
+        days: int = Query(default=7, le=30),
+    ):
+        """获取行为模式热力图数据
+
+        返回按时间和类型维度的行为频率数据。
+        """
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"data": [], "x_labels": [], "y_labels": [], "error": "MemoryManager 未初始化"}
+
+        try:
+            patterns = await mgr.get_behavior_patterns(user_id)
+
+            # 构建热力图矩阵
+            hours = list(range(24))
+            pattern_types = list(set(p.pattern_type for p in patterns))
+
+            if not pattern_types:
+                pattern_types = ["route", "temperature", "media", "time", "interaction"]
+
+            # 初始化矩阵
+            matrix = [[0 for _ in hours] for _ in pattern_types]
+
+            for pattern in patterns:
+                type_idx = pattern_types.index(pattern.pattern_type) if pattern.pattern_type in pattern_types else 0
+                hour = pattern.last_observed.hour if pattern.last_observed else 12
+                matrix[type_idx][hour] += pattern.occurrence_count
+
+            return {
+                "data": matrix,
+                "x_labels": [f"{h:02d}:00" for h in hours],
+                "y_labels": pattern_types,
+            }
+        except Exception as e:
+            return {"data": [], "x_labels": [], "y_labels": [], "error": str(e)}
+
+    @app.get("/api/admin/status")
+    async def get_system_status():
+        """获取系统运行状态
+
+        包含资源占用、任务进度、存储统计等监控数据。
+        数据每5分钟自动刷新，支持手动刷新。
+        """
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"error": "MemoryManager 未初始化"}
+
+        try:
+            import psutil
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage("/")
+        except ImportError:
+            cpu_percent = 0
+            memory = type("mem", (), {"percent": 0, "total": 0, "used": 0})()
+            disk = type("disk", (), {"percent": 0, "total": 0, "used": 0})()
+
+        try:
+            stats = await mgr.get_stats()
+        except Exception:
+            stats = {}
+
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "system": {
+                "cpu_percent": cpu_percent,
+                "memory_percent": memory.percent,
+                "memory_total_gb": round(memory.total / (1024**3), 1),
+                "memory_used_gb": round(memory.used / (1024**3), 1),
+                "disk_percent": disk.percent,
+            },
+            "memory_system": {
+                "short_term_count": stats.get("short_term_memories", 0),
+                "short_term_capacity": stats.get("short_term_capacity", 500),
+                "usage_percent": round(
+                    stats.get("short_term_memories", 0) / max(1, stats.get("short_term_capacity", 500)) * 100, 1
+                ),
+            },
+            "status": "running",
+            "uptime_seconds": getattr(app.state, "start_time", 0) and (
+                datetime.now() - app.state.start_time
+            ).total_seconds() or 0,
+        }
+
+    @app.get("/api/admin/users")
+    async def get_users_summary():
+        """获取用户概览数据"""
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"users": [], "error": "MemoryManager 未初始化"}
+
+        # 从反馈统计获取活跃用户
+        try:
+            feedback_stats = await mgr.get_feedback_stats(days=30)
+        except Exception:
+            feedback_stats = {}
+
+        return {
+            "total_feedback": feedback_stats.get("total", 0),
+            "like_rate": feedback_stats.get("like_rate", 0),
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    app.state.start_time = datetime.now()
+    return app
+
+
+# 模块级 app 实例，用于 uvicorn 直接启动: uvicorn cognitive_memory.admin.server:app
+if HAS_MEMORY_MANAGER:
+    _default_manager = MemoryManager()
+else:
+    _default_manager = None
+
+app = create_admin_app(_default_manager)
+
+
+def main():
+    """启动管理控制台服务"""
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

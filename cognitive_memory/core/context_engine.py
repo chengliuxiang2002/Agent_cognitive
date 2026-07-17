@@ -136,7 +136,8 @@ class ContextEngine:
     ) -> list[dict[str, Any]]:
         """基于当前场景预测用户需求
 
-        返回预测的需求列表，按置信度排序
+        返回预测的需求列表，按置信度排序。
+        每个预测结果包含 reason 字段，说明推荐依据。
         """
         predictions: list[dict[str, Any]] = []
 
@@ -144,12 +145,14 @@ class ContextEngine:
         patterns = await self._pattern_store.get_patterns(user_id)
         for pattern in patterns:
             if self._pattern_matches_context(pattern, current_scene):
+                reason = self._build_pattern_reason(pattern, current_scene)
                 predictions.append({
                     "type": "pattern_match",
                     "pattern_name": pattern.pattern_name,
                     "action": pattern.expected_action,
                     "confidence": pattern.confidence,
                     "source": "behavior_pattern",
+                    "reason": reason,
                 })
 
         # 2. 查询相似场景的历史记忆
@@ -158,37 +161,103 @@ class ContextEngine:
         )
         for item in context_result.items:
             if item.memory_type == MemoryType.EPISODIC:
+                reason = self._build_episodic_reason(item, current_scene)
                 predictions.append({
                     "type": "historical_similar",
                     "intent": item.content.get("intent", ""),
                     "action": item.content.get("processed_input", {}),
                     "confidence": item.strength * 0.7,
                     "source": "episodic_memory",
+                    "reason": reason,
                 })
 
         # 3. 基于用户画像的默认推荐
         if profile:
-            # 温度推荐
             if profile.temperature_preference:
                 predictions.append({
                     "type": "profile_default",
                     "action": {"set_temperature": profile.temperature_preference},
                     "confidence": profile.confidence_score * 0.8,
                     "source": "user_profile",
+                    "reason": f"基于您的温度偏好设置({profile.temperature_preference}℃)，共{profile.data_points_count}次记录",
                 })
 
-            # 驾驶模式推荐
             if profile.driving_mode_preference and current_scene.traffic_condition == "smooth":
                 predictions.append({
                     "type": "profile_default",
                     "action": {"set_driving_mode": profile.driving_mode_preference},
                     "confidence": profile.confidence_score * 0.6,
                     "source": "user_profile",
+                    "reason": f"当前路况畅通，根据您{profile.driving_mode_preference}模式的驾驶偏好推荐",
                 })
 
         # 按置信度排序
         predictions.sort(key=lambda x: x["confidence"], reverse=True)
         return predictions[:5]
+
+    def _build_pattern_reason(
+        self, pattern: BehaviorPattern, context: SceneContext
+    ) -> str:
+        """为行为模式匹配生成可解释的推荐理由"""
+        pattern_type = pattern.pattern_type
+        count = pattern.occurrence_count
+
+        if pattern_type == "route":
+            dest = pattern.expected_action.get("navigate_to", "目的地")
+            time_slot = self._time_slot_label(context.time_of_day)
+            return f"基于您过去{count}次{time_slot}前往「{dest}」的通勤记录"
+
+        if pattern_type == "temperature":
+            temp = pattern.expected_action.get("set_temperature", "")
+            return f"根据您{count}次在当前场景下的温度设置记录，偏好{temp}℃"
+
+        if pattern_type == "media":
+            genre = pattern.expected_action.get("preferred_genre", "")
+            return f"基于您{count}次收听「{genre}」类型音乐的记录"
+
+        if pattern_type == "time":
+            return f"根据您过去{count}次在此时间段的活动模式分析"
+
+        if pattern_type == "interaction":
+            style = pattern.expected_action.get("style", "")
+            return f"基于您{count}次交互记录，识别出{style}交互风格偏好"
+
+        return f"基于{count}次历史行为模式匹配"
+
+    def _build_episodic_reason(
+        self, item: MemoryItem, context: SceneContext
+    ) -> str:
+        """为情景记忆匹配生成可解释的推荐理由"""
+        intent = item.content.get("intent", "")
+        metadata = item.metadata
+        session_id = metadata.get("session_id", "")
+        time_label = self._time_slot_label(context.time_of_day)
+
+        intent_labels = {
+            "navigate": "导航",
+            "set_temperature": "空调设置",
+            "play_music": "音乐播放",
+            "adjust_seat": "座椅调节",
+            "media_control": "媒体控制",
+        }
+        intent_label = intent_labels.get(intent, intent)
+
+        access_count = item.access_count
+        if access_count > 0:
+            return f"根据您{time_label}的相似场景记录，关联到{access_count}次{intent_label}操作"
+
+        return f"基于当前{time_label}场景与历史{intent_label}记录的关联分析"
+
+    @staticmethod
+    def _time_slot_label(time_of_day: str) -> str:
+        """将时段转换为中文标签"""
+        labels = {
+            "morning": "早晨",
+            "afternoon": "下午",
+            "evening": "傍晚",
+            "night": "夜间",
+        }
+        return labels.get(time_of_day, "该时段")
 
     def detect_scene_change(
         self, previous: SceneContext, current: SceneContext

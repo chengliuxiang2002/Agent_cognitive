@@ -134,6 +134,23 @@ class LongTermMemoryStore(BaseMemoryStore):
                     ON behavior_patterns(user_id);
                 CREATE INDEX IF NOT EXISTS idx_bp_pattern_type
                     ON behavior_patterns(pattern_type);
+
+                CREATE TABLE IF NOT EXISTS user_feedback (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    prediction_id TEXT NOT NULL,
+                    feedback_type TEXT NOT NULL DEFAULT '',
+                    prediction_data TEXT,
+                    comment TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_uf_user_id
+                    ON user_feedback(user_id);
+                CREATE INDEX IF NOT EXISTS idx_uf_prediction_id
+                    ON user_feedback(prediction_id);
+                CREATE INDEX IF NOT EXISTS idx_uf_created_at
+                    ON user_feedback(created_at);
             """)
 
     def _row_to_item(self, row: sqlite3.Row) -> MemoryItem:
@@ -466,6 +483,13 @@ class InteractionStore(BaseInteractionStore):
 
         return [self._row_to_record(row) for row in rows]
 
+    async def delete(self, record_id: str) -> bool:
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM interaction_records WHERE id = ?", (record_id,)
+            )
+            return cursor.rowcount > 0
+
     def _row_to_record(self, row: sqlite3.Row) -> InteractionRecord:
         scene_ctx = None
         if row["scene_context"]:
@@ -575,6 +599,13 @@ class PatternStore(BasePatternStore):
                 return self._row_to_pattern(row)
         return None
 
+    async def delete_pattern(self, pattern_id: str) -> bool:
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM behavior_patterns WHERE id = ?", (pattern_id,)
+            )
+            return cursor.rowcount > 0
+
     def _row_to_pattern(self, row: sqlite3.Row) -> BehaviorPattern:
         return BehaviorPattern(
             id=row["id"],
@@ -590,3 +621,126 @@ class PatternStore(BasePatternStore):
             last_observed=datetime.fromisoformat(row["last_observed"]),
             related_context_keys=json.loads(row["related_context_keys"]),
         )
+
+
+class FeedbackStore:
+    """用户反馈存储 - SQLite 实现
+
+    用于存储用户对预测结果的二元反馈（点赞/踩），
+    反馈数据用于动态调整模式识别的置信度权重算法。
+    """
+
+    def __init__(self, db_path: str = "cognitive_memory.db"):
+        self._db_path = db_path
+        self._ensure_table()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_table(self):
+        with self._get_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_feedback (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    prediction_id TEXT NOT NULL,
+                    feedback_type TEXT NOT NULL DEFAULT '',
+                    prediction_data TEXT,
+                    comment TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+            """)
+
+    async def record_feedback(
+        self,
+        feedback_id: str,
+        user_id: str,
+        prediction_id: str,
+        feedback_type: str,
+        prediction_data: Optional[dict] = None,
+        comment: str = "",
+    ) -> bool:
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO user_feedback
+                   (id, user_id, prediction_id, feedback_type,
+                    prediction_data, comment, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    feedback_id,
+                    user_id,
+                    prediction_id,
+                    feedback_type,
+                    json.dumps(prediction_data, ensure_ascii=False) if prediction_data else None,
+                    comment,
+                    datetime.now().isoformat(),
+                ),
+            )
+        return True
+
+    async def get_feedback_stats(
+        self, user_id: Optional[str] = None, days: int = 30
+    ) -> dict:
+        """获取反馈统计"""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+        with self._get_conn() as conn:
+            if user_id:
+                row = conn.execute(
+                    """SELECT
+                        COUNT(*) as total,
+                        SUM(CASE WHEN feedback_type = 'like' THEN 1 ELSE 0 END) as likes,
+                        SUM(CASE WHEN feedback_type = 'dislike' THEN 1 ELSE 0 END) as dislikes
+                       FROM user_feedback
+                       WHERE user_id = ? AND created_at >= ?""",
+                    (user_id, cutoff),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """SELECT
+                        COUNT(*) as total,
+                        SUM(CASE WHEN feedback_type = 'like' THEN 1 ELSE 0 END) as likes,
+                        SUM(CASE WHEN feedback_type = 'dislike' THEN 1 ELSE 0 END) as dislikes
+                       FROM user_feedback
+                       WHERE created_at >= ?""",
+                    (cutoff,),
+                ).fetchone()
+
+        total = row["total"] or 0
+        likes = row["likes"] or 0
+        dislikes = row["dislikes"] or 0
+
+        return {
+            "total": total,
+            "likes": likes,
+            "dislikes": dislikes,
+            "like_rate": round(likes / total, 4) if total > 0 else 0.0,
+            "period_days": days,
+        }
+
+    async def get_user_feedback(
+        self, user_id: str, limit: int = 50
+    ) -> list[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM user_feedback
+                   WHERE user_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (user_id, limit),
+            ).fetchall()
+
+        return [
+            {
+                "id": row["id"],
+                "user_id": row["user_id"],
+                "prediction_id": row["prediction_id"],
+                "feedback_type": row["feedback_type"],
+                "prediction_data": json.loads(row["prediction_data"]) if row["prediction_data"] else None,
+                "comment": row["comment"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
