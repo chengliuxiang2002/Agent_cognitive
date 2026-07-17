@@ -253,6 +253,10 @@ class MemoryManager:
         """获取用户行为模式"""
         return await self._pattern_store.get_patterns(user_id, pattern_type)
 
+    async def get_all_behavior_patterns(self, limit: int = 200) -> list[BehaviorPattern]:
+        """获取所有用户行为模式（管理界面图谱用）"""
+        return await self._pattern_store.get_all_patterns(limit)
+
     async def forget_user_data(self, user_id: str) -> int:
         """删除用户所有数据（隐私合规）"""
         count = 0

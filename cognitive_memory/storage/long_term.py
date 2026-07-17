@@ -586,6 +586,15 @@ class PatternStore(BasePatternStore):
 
         return [self._row_to_pattern(row) for row in rows]
 
+    async def get_all_patterns(
+        self, limit: int = 200
+    ) -> list[BehaviorPattern]:
+        """获取所有用户的行为模式（用于管理界面图谱展示）"""
+        sql = "SELECT * FROM behavior_patterns ORDER BY confidence DESC LIMIT ?"
+        with self._get_conn() as conn:
+            rows = conn.execute(sql, (limit,)).fetchall()
+        return [self._row_to_pattern(row) for row in rows]
+
     async def get_pattern_by_name(
         self, user_id: str, pattern_name: str
     ) -> Optional[BehaviorPattern]:

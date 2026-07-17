@@ -7,12 +7,14 @@
 - 行为模式热力图数据
 - 系统运行状态监控
 - 数据自动刷新（5分钟间隔）
+- 后台定时数据模拟（持续产生新数据）
 """
 
 from __future__ import annotations
 
 import json
 import os
+import random
 import asyncio
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +39,186 @@ try:
 except ImportError:
     HAS_MEMORY_MANAGER = False
 
+
+# ─── 后台数据模拟器 ────────────────────────────────────
+
+# 模拟数据素材池
+_SIM_WEATHER = ["sunny", "cloudy", "rainy", "windy", "foggy", "snowy"]
+_SIM_TRAFFIC = ["smooth", "moderate", "congested"]
+_SIM_TIME_SLOTS = ["morning", "afternoon", "evening", "night"]
+_SIM_LOCATIONS = ["home", "office", "road", "gym", "mall", "park"]
+_SIM_INTENTS = [
+    "navigate", "play_music", "adjust_temperature", "switch_mode",
+    "find_parking", "check_weather", "call_contact", "safety_alert",
+]
+_SIM_MUSIC_GENRES = ["pop", "rock", "jazz", "classical", "electronic", "hiphop", "lofi"]
+_SIM_TEMP_VALUES = [21, 22, 23, 24, 25, 26, 27, 28]
+_SIM_DRIVE_MODES = ["eco", "comfort", "sport", "normal"]
+
+# 用户ID → 姓名映射
+_USER_NAMES = {
+    "001": "张明", "002": "李芳", "003": "王建国", "004": "陈晓",
+    "005": "刘洋", "006": "赵丽", "007": "孙磊", "008": "周婷",
+    "009": "吴强", "010": "郑雪", "011": "冯伟", "012": "褚琳",
+    "013": "蒋涛", "014": "沈月", "015": "韩飞", "016": "杨华",
+    "017": "朱敏", "018": "秦刚", "019": "许晴", "020": "何琳",
+}
+
+
+class BackgroundDataSimulator:
+    """后台数据模拟器 - 定时生成模拟交互数据
+
+    每隔 interval 秒，为随机用户生成一条模拟交互记录，
+    并根据交互更新行为模式，使前端图谱/仪表盘持续变化。
+    """
+
+    def __init__(
+        self,
+        memory_manager,
+        interval: int = 60,
+        online_ttl: int = 300,
+    ):
+        self._mgr = memory_manager
+        self._interval = interval
+        self._online_ttl = online_ttl  # 在线判定时间窗口(秒)
+        self._task: Optional[asyncio.Task] = None
+        self._running = False
+        self._sim_count = 0
+        self._active_users: dict[str, datetime] = {}  # user_id → 最后活跃时间
+
+    async def start(self):
+        self._running = True
+        self._task = asyncio.create_task(self._run())
+        print(f"[DataSimulator] 启动, 间隔 {self._interval}s")
+
+    async def stop(self):
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        print(f"[DataSimulator] 已停止, 共生成 {self._sim_count} 条数据")
+
+    @property
+    def sim_count(self) -> int:
+        return self._sim_count
+
+    @property
+    def online_users(self) -> list[dict]:
+        """返回当前在线用户列表（最近 _online_ttl 秒内有交互）"""
+        now = datetime.now()
+        result = []
+        for uid, last_active in self._active_users.items():
+            if (now - last_active).total_seconds() <= self._online_ttl:
+                result.append({
+                    "user_id": uid,
+                    "name": _USER_NAMES.get(uid, uid),
+                    "last_active": last_active.isoformat(),
+                    "seconds_ago": round((now - last_active).total_seconds()),
+                })
+        result.sort(key=lambda x: x["seconds_ago"])
+        return result
+
+    async def _run(self):
+        while self._running:
+            try:
+                await self._generate_one()
+                self._sim_count += 1
+            except Exception as e:
+                print(f"[DataSimulator] 生成失败: {e}")
+            await asyncio.sleep(self._interval)
+
+    async def _generate_one(self):
+        from ..models.memory import InteractionRecord, SceneContext, BehaviorPattern
+
+        now = datetime.now()
+        user_id = f"{random.randint(1, 20):03d}"
+
+        # 记录活跃用户
+        self._active_users[user_id] = now
+        intent = random.choice(_SIM_INTENTS)
+
+        # 根据意图生成不同的交互
+        if intent == "navigate":
+            destinations = ["中关村", "国贸", "五道口", "望京", "三里屯", "西二旗"]
+            dest = random.choice(destinations)
+            raw_input = random.choice([
+                f"导航到{dest}", f"去{dest}", f"带我去{dest}",
+            ])
+            system_response = {"action": "navigate", "destination": dest}
+
+        elif intent == "play_music":
+            genre = random.choice(_SIM_MUSIC_GENRES)
+            raw_input = random.choice([
+                f"播放{genre}音乐", f"来点{genre}", f"我想听{genre}",
+            ])
+            system_response = {"action": "play", "genre": genre}
+
+        elif intent == "adjust_temperature":
+            temp = random.choice(_SIM_TEMP_VALUES)
+            raw_input = random.choice([
+                f"温度调到{temp}度", f"有点冷", f"太热了",
+            ])
+            system_response = {"action": "set_temp", "value": temp}
+
+        elif intent == "switch_mode":
+            mode = random.choice(_SIM_DRIVE_MODES)
+            raw_input = f"切换到{mode}模式"
+            system_response = {"action": "switch_mode", "mode": mode}
+
+        elif intent == "find_parking":
+            raw_input = "找附近停车场"
+            system_response = {"action": "find_parking", "nearby": "500m"}
+
+        elif intent == "check_weather":
+            raw_input = random.choice(["今天天气怎么样", "会下雨吗"])
+            system_response = {"action": "weather", "forecast": random.choice(_SIM_WEATHER)}
+
+        elif intent == "call_contact":
+            raw_input = "打电话给XX"
+            system_response = {"action": "call", "contact": "XX"}
+
+        else:  # safety_alert
+            alert = random.choice(["碰撞预警", "车道偏离", "疲劳驾驶提醒", "超速警告"])
+            raw_input = alert
+            system_response = {"action": "alert", "type": alert}
+
+        record = InteractionRecord(
+            user_id=user_id,
+            interaction_type=random.choice(["voice_command", "touch_input", "automatic"]),
+            intent=intent,
+            raw_input=raw_input,
+            scene_context=SceneContext(
+                time_of_day=random.choice(_SIM_TIME_SLOTS),
+                location_type=random.choice(_SIM_LOCATIONS),
+                weather=random.choice(_SIM_WEATHER),
+                traffic_condition=random.choice(_SIM_TRAFFIC),
+            ),
+            system_response=system_response,
+            response_time_ms=random.randint(80, 400),
+            was_successful=random.random() > 0.05,
+            timestamp=now,
+        )
+
+        await self._mgr._interaction_store.record(record)
+
+        # 尝试更新行为模式（增量刷新置信度）
+        try:
+            patterns = await self._mgr._pattern_store.get_patterns(user_id, intent)
+            if patterns:
+                # 更新现有模式的 last_observed
+                p = patterns[0]
+                p.last_observed = now
+                p.occurrence_count += 1
+                p.confidence = min(0.98, p.confidence + random.uniform(0.001, 0.01))
+                await self._mgr._pattern_store.save_pattern(p)
+        except Exception:
+            pass  # 模式更新不影响交互记录
+
+
+# ─── 创建应用 ──────────────────────────────────────────
 
 def create_admin_app(memory_manager=None) -> "FastAPI":
     """创建管理控制台 FastAPI 应用"""
@@ -92,7 +274,7 @@ def create_admin_app(memory_manager=None) -> "FastAPI":
             if user_id:
                 patterns = await mgr.get_behavior_patterns(user_id)
             else:
-                patterns = await mgr.get_behavior_patterns("")
+                patterns = await mgr.get_all_behavior_patterns(limit)
 
             for pattern in patterns[:limit]:
                 node_id = pattern.id
@@ -279,13 +461,52 @@ def create_admin_app(memory_manager=None) -> "FastAPI":
             "timestamp": datetime.now().isoformat(),
         }
 
-    app.state.start_time = datetime.now()
+    @app.get("/api/admin/simulator")
+    async def get_simulator_status():
+        """获取数据模拟器状态"""
+        sim = getattr(app.state, "simulator", None)
+        if sim is None:
+            return {"running": False, "sim_count": 0}
+        return {
+            "running": sim._running,
+            "sim_count": sim.sim_count,
+            "interval_seconds": sim._interval,
+        }
+
+    @app.get("/api/admin/online-users")
+    async def get_online_users():
+        """获取当前在线用户"""
+        sim = getattr(app.state, "simulator", None)
+        if sim is None:
+            return {"online": 0, "users": []}
+        users = sim.online_users
+        return {"online": len(users), "users": users}
+
+    # ─── 生命周期管理 ───────────────────────────────────
+
+    @app.on_event("startup")
+    async def on_startup():
+        mgr = app.state.memory_manager
+        if mgr is not None:
+            simulator = BackgroundDataSimulator(mgr, interval=60)
+            app.state.simulator = simulator
+            await simulator.start()
+        app.state.start_time = datetime.now()
+
+    @app.on_event("shutdown")
+    async def on_shutdown():
+        sim = getattr(app.state, "simulator", None)
+        if sim is not None:
+            await sim.stop()
+
     return app
 
 
 # 模块级 app 实例，用于 uvicorn 直接启动: uvicorn cognitive_memory.admin.server:app
 if HAS_MEMORY_MANAGER:
-    _default_manager = MemoryManager()
+    _default_manager = MemoryManager(
+        db_path=str(Path(__file__).parent.parent.parent / "cognitive_memory.db")
+    )
 else:
     _default_manager = None
 

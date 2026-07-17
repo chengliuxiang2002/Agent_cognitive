@@ -56,9 +56,11 @@ async function apiGet(path, params = {}) {
 // ─── 仪表盘 ──────────────────────────────────────────────
 
 async function loadDashboard() {
-  const [status, users] = await Promise.all([
+  const [status, users, sim, online] = await Promise.all([
     apiGet('/status'),
     apiGet('/users'),
+    apiGet('/simulator'),
+    apiGet('/online-users'),
   ]);
 
   if (status) {
@@ -71,6 +73,30 @@ async function loadDashboard() {
     document.getElementById('statFeedback').textContent = users.total_feedback || '--';
     document.getElementById('statLikeRate').textContent =
       users.like_rate ? (users.like_rate * 100).toFixed(1) + '%' : '--';
+  }
+
+  if (sim) {
+    const badge = document.getElementById('simStatus');
+    if (badge) {
+      badge.textContent = sim.running ? `模拟中 (${sim.sim_count}条)` : '已停止';
+      badge.className = sim.running ? 'status-badge status-running' : 'status-badge status-warning';
+    }
+  }
+
+  // 渲染在线用户
+  if (online) {
+    document.getElementById('onlineCount').textContent = online.online;
+    const list = document.getElementById('onlineUsersList');
+    if (online.users.length === 0) {
+      list.innerHTML = '<span class="online-empty">暂无在线用户</span>';
+    } else {
+      list.innerHTML = online.users.map(u =>
+        `<span class="online-user-tag">
+          <span class="dot"></span>${u.name}(${u.user_id})
+          <span class="time-ago">${u.seconds_ago}s前</span>
+        </span>`
+      ).join('');
+    }
   }
 
   renderResourceChart();
@@ -166,8 +192,18 @@ async function loadGraph() {
   const userId = document.getElementById('graphUserId').value.trim();
   const data = await apiGet('/graph', { user_id: userId, limit: 100 });
 
+  console.log('Graph API response:', data);
+
   if (!data || data.error) {
     console.error('Graph data error:', data?.error);
+    document.getElementById('graphContainer').innerHTML =
+      `<div class="empty-state">数据加载失败: ${data?.error || '未知错误'}</div>`;
+    return;
+  }
+
+  if (!data.nodes || data.nodes.length === 0) {
+    document.getElementById('graphContainer').innerHTML =
+      '<div class="empty-state">暂无数据，请先填充种子数据或输入用户ID查询</div>';
     return;
   }
 
@@ -182,6 +218,7 @@ function renderGraph(nodes, edges) {
     route: '#4A90D9',
     temperature: '#E74C3C',
     media: '#8E44AD',
+    driving_mode: '#27AE60',
     time: '#27AE60',
     interaction: '#F39C12',
     context: '#95A5A6',
