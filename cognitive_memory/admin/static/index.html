@@ -29,6 +29,8 @@
         <li data-panel="radar"><span class="icon">🎯</span> 用户画像</li>
         <li data-panel="heatmap"><span class="icon">🔥</span> 行为热力图</li>
         <li data-panel="monitor"><span class="icon">🖥️</span> 系统监控</li>
+        <li data-panel="team"><span class="icon">👥</span> 团队管理</li>
+        <li data-panel="document"><span class="icon">📄</span> 文档上下文</li>
       </ul>
     </nav>
 
@@ -87,6 +89,7 @@
         <div class="panel-toolbar">
           <input type="text" id="radarUserId" placeholder="输入用户ID" class="input">
           <button id="radarLoadBtn" class="btn btn-primary">加载画像</button>
+          <button id="exportBtn" class="btn btn-success" onclick="showExportModal()">📥 导出数据</button>
         </div>
         <div class="chart-card">
           <canvas id="chartRadar"></canvas>
@@ -140,7 +143,164 @@
           </div>
         </div>
       </section>
+
+      <!-- 团队管理面板 (FE-1) -->
+      <section id="panel-team" class="panel">
+        <div class="panel-toolbar">
+          <input type="text" id="teamUserId" placeholder="输入用户ID查看团队" class="input" value="001">
+          <button id="teamLoadBtn" class="btn btn-primary">加载团队</button>
+          <button id="teamCreateBtn" class="btn btn-success" onclick="showCreateTeam()">+ 创建团队</button>
+          <span class="hint">创建和管理团队共享记忆</span>
+        </div>
+        <!-- 创建团队表单 -->
+        <div id="createTeamForm" class="form-panel" style="display:none">
+          <h3>创建新团队</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label>团队名称</label>
+              <input type="text" id="newTeamName" class="input" placeholder="如：研发一部">
+            </div>
+            <div class="form-group">
+              <label>部门</label>
+              <input type="text" id="newTeamDept" class="input" placeholder="如：engineering">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>描述</label>
+            <input type="text" id="newTeamDesc" class="input" placeholder="团队描述" style="width:100%">
+          </div>
+          <div class="form-group">
+            <label>成员（每行一个，格式: user_id,角色,权限）</label>
+            <textarea id="newTeamMembers" class="input textarea" rows="3" placeholder="001,leader,admin&#10;002,member,edit&#10;003,member,view"></textarea>
+          </div>
+          <div class="form-actions">
+            <button class="btn btn-secondary" onclick="hideCreateTeam()">取消</button>
+            <button class="btn btn-primary" onclick="doCreateTeam()">确认创建</button>
+          </div>
+        </div>
+        <!-- 团队列表 -->
+        <div id="teamList" class="team-list">
+          <div class="empty-state">暂无团队数据，请先输入用户ID加载</div>
+        </div>
+        <!-- 团队详情 -->
+        <div id="teamDetail" class="team-detail" style="display:none">
+          <div class="team-detail-header">
+            <h3 id="teamDetailName"></h3>
+            <span class="team-detail-meta" id="teamDetailMeta"></span>
+          </div>
+          <div class="team-detail-members" id="teamDetailMembers"></div>
+          <div class="team-detail-section">
+            <h4>团队记忆 <button class="btn btn-small btn-primary" onclick="showCreateTeamMemory()">+ 添加记忆</button></h4>
+            <div id="createTeamMemoryForm" class="form-panel" style="display:none">
+              <div class="form-group">
+                <input type="text" id="newMemTitle" class="input" placeholder="记忆标题" style="width:100%">
+              </div>
+              <div class="form-group">
+                <select id="newMemType" class="input" style="width:100%">
+                  <option value="general">通用</option>
+                  <option value="meeting_room">会议室信息</option>
+                  <option value="project_doc">项目文档路径</option>
+                  <option value="team_rule">团队规范</option>
+                  <option value="contact">联系人</option>
+                  <option value="process_guide">流程指南</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <textarea id="newMemContent" class="input textarea" rows="2" placeholder='内容（JSON格式，如: {"key": "value"}）' style="width:100%"></textarea>
+              </div>
+              <div class="form-actions">
+                <button class="btn btn-secondary" onclick="hideCreateTeamMemory()">取消</button>
+                <button class="btn btn-primary" onclick="doCreateTeamMemory()">确认</button>
+              </div>
+            </div>
+            <div id="teamMemoriesList" class="memories-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 文档上下文面板 (FE-4) -->
+      <section id="panel-document" class="panel">
+        <div class="panel-toolbar">
+          <input type="text" id="docUserId" placeholder="输入用户ID" class="input" value="001">
+          <button id="docLoadBtn" class="btn btn-primary">加载文档</button>
+          <span class="hint">最近编辑的文档及其上下文信息</span>
+        </div>
+        <!-- 文档列表 -->
+        <div class="document-grid">
+          <div class="chart-card" style="grid-column: 1 / -1;">
+            <h3>最近编辑的文档</h3>
+            <div id="docList" class="doc-list">
+              <div class="empty-state">暂无数据，请先输入用户ID加载</div>
+            </div>
+          </div>
+        </div>
+        <!-- 文档详情 -->
+        <div id="docDetail" class="doc-detail" style="display:none">
+          <div class="chart-card">
+            <div class="doc-detail-header">
+              <h3 id="docDetailName"></h3>
+              <span class="doc-detail-format" id="docDetailFormat"></span>
+            </div>
+            <p class="doc-detail-summary" id="docDetailSummary"></p>
+            <div class="doc-detail-meta">
+              <div class="meta-item">
+                <span class="meta-label">编辑次数</span>
+                <span class="meta-value" id="docDetailEdits">--</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">累计编辑时间</span>
+                <span class="meta-value" id="docDetailTime">--</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">最后访问</span>
+                <span class="meta-value" id="docDetailLastAccess">--</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">关联会话</span>
+                <span class="meta-value" id="docDetailSessions">--</span>
+              </div>
+            </div>
+            <div class="doc-detail-keywords" id="docDetailKeywords"></div>
+          </div>
+        </div>
+      </section>
     </main>
+  </div>
+
+  <!-- 导出弹窗 -->
+  <div id="exportModal" class="modal" style="display:none">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>导出个人数据</h3>
+        <span class="modal-close" onclick="closeExportModal()">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>用户ID</label>
+          <input type="text" id="exportUserId" class="input" placeholder="输入用户ID" value="">
+        </div>
+        <div class="form-group">
+          <label>导出格式</label>
+          <select id="exportFormat" class="input">
+            <option value="json">JSON</option>
+            <option value="csv">CSV</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>数据类别（留空=全部）</label>
+          <div class="checkbox-group">
+            <label class="checkbox-label"><input type="checkbox" value="behavior" checked> 行为记录</label>
+            <label class="checkbox-label"><input type="checkbox" value="preference" checked> 偏好设置</label>
+            <label class="checkbox-label"><input type="checkbox" value="entity" checked> 关联实体</label>
+          </div>
+        </div>
+        <div id="exportResult" class="export-result" style="display:none"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeExportModal()">取消</button>
+        <button class="btn btn-primary" onclick="doExport()">导出</button>
+      </div>
+    </div>
   </div>
 
   <script src="/static/app.js"></script>

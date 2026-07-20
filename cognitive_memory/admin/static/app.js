@@ -34,6 +34,8 @@ function initNavigation() {
       if (panelId === 'graph') initGraphPanel();
       if (panelId === 'dashboard') loadDashboard();
       if (panelId === 'monitor') loadMonitor();
+      if (panelId === 'team') initTeamPanel();
+      if (panelId === 'document') initDocumentPanel();
     });
   });
 }
@@ -49,6 +51,22 @@ async function apiGet(path, params = {}) {
     return await resp.json();
   } catch (e) {
     console.error(`API error: ${path}`, e);
+    return null;
+  }
+}
+
+async function apiPost(path, data = {}) {
+  const url = `/api/admin${path}`;
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.json();
+  } catch (e) {
+    console.error(`API POST error: ${path}`, e);
     return null;
   }
 }
@@ -423,6 +441,365 @@ async function loadMonitor() {
   }
 }
 
+// ─── FE-1: 团队管理 ──────────────────────────────────────
+
+let _currentTeamId = null;
+
+function initTeamPanel() {
+  document.getElementById('teamLoadBtn').addEventListener('click', loadTeams);
+  // 默认加载
+  setTimeout(() => loadTeams(), 500);
+}
+
+async function loadTeams() {
+  const userId = document.getElementById('teamUserId').value.trim();
+  if (!userId) { alert('请输入用户ID'); return; }
+
+  const data = await apiGet(`/teams/${userId}`);
+  if (!data || data.error) {
+    document.getElementById('teamList').innerHTML = `<div class="empty-state">加载失败: ${data?.error || '未知错误'}</div>`;
+    return;
+  }
+
+  const teams = data.teams || [];
+  const list = document.getElementById('teamList');
+
+  if (teams.length === 0) {
+    list.innerHTML = '<div class="empty-state">该用户暂无所属团队，点击"创建团队"新建</div>';
+    return;
+  }
+
+  list.innerHTML = teams.map((team, idx) => `
+    <div class="team-card" onclick="showTeamDetail('${team.id}')">
+      <div class="team-card-header">
+        <span class="team-card-name">${team.name}</span>
+        <span class="team-card-dept">${team.department || '--'}</span>
+      </div>
+      <div class="team-card-meta">
+        <span>👥 ${(team.members || []).length} 人</span>
+        <span>📝 ${team.memory_count || 0} 条记忆</span>
+        <span>🕐 ${team.created_at ? new Date(team.created_at).toLocaleDateString() : '--'}</span>
+      </div>
+      <div class="team-card-desc">${team.description || '暂无描述'}</div>
+    </div>
+  `).join('');
+}
+
+function showCreateTeam() {
+  document.getElementById('createTeamForm').style.display = 'block';
+  document.getElementById('teamDetail').style.display = 'none';
+}
+
+function hideCreateTeam() {
+  document.getElementById('createTeamForm').style.display = 'none';
+}
+
+async function doCreateTeam() {
+  const name = document.getElementById('newTeamName').value.trim();
+  if (!name) { alert('请输入团队名称'); return; }
+
+  const membersText = document.getElementById('newTeamMembers').value.trim();
+  const members = [];
+  if (membersText) {
+    membersText.split('\n').forEach(line => {
+      const parts = line.trim().split(',');
+      if (parts.length >= 1) {
+        members.push({
+          user_id: parts[0].trim(),
+          role: parts[1]?.trim() || 'member',
+          permission: parts[2]?.trim() || 'view',
+        });
+      }
+    });
+  }
+
+  const data = await apiPost('/teams', {
+    name: name,
+    description: document.getElementById('newTeamDesc').value.trim(),
+    department: document.getElementById('newTeamDept').value.trim(),
+    members: members,
+    created_by: document.getElementById('teamUserId').value.trim(),
+  });
+
+  if (data && data.success) {
+    alert('团队创建成功！');
+    hideCreateTeam();
+    // 重置表单
+    document.getElementById('newTeamName').value = '';
+    document.getElementById('newTeamDesc').value = '';
+    document.getElementById('newTeamDept').value = '';
+    document.getElementById('newTeamMembers').value = '';
+    // 刷新列表
+    await loadTeams();
+  } else {
+    alert('创建失败: ' + (data?.error || '未知错误'));
+  }
+}
+
+async function showTeamDetail(teamId) {
+  _currentTeamId = teamId;
+  document.getElementById('teamDetail').style.display = 'block';
+  document.getElementById('createTeamForm').style.display = 'none';
+
+  // 获取团队详情
+  const userId = document.getElementById('teamUserId').value.trim();
+  const data = await apiGet(`/teams/${userId}`);
+  if (!data || !data.teams) return;
+
+  const team = data.teams.find(t => t.id === teamId);
+  if (!team) return;
+
+  document.getElementById('teamDetailName').textContent = team.name;
+  document.getElementById('teamDetailMeta').textContent = `${team.department || '--'} | 创建者: ${team.created_by || '--'}`;
+
+  const members = team.members || [];
+  document.getElementById('teamDetailMembers').innerHTML = `
+    <h4>团队成员 (${members.length}人)</h4>
+    <div class="member-list">
+      ${members.map(m => `
+        <div class="member-tag">
+          <span class="member-id">${m.user_id}</span>
+          <span class="member-role">${m.role || 'member'}</span>
+          <span class="member-perm ${m.permission}">${m.permission}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+
+  // 加载团队记忆
+  await loadTeamMemories(teamId, userId);
+}
+
+async function loadTeamMemories(teamId, userId) {
+  const data = await apiGet(`/teams/${teamId}/memories`, { user_id: userId });
+  const list = document.getElementById('teamMemoriesList');
+
+  if (!data || data.error) {
+    list.innerHTML = `<p class="empty-hint">加载失败: ${data?.error || ''}</p>`;
+    return;
+  }
+
+  const items = data.items || [];
+  if (items.length === 0) {
+    list.innerHTML = '<p class="empty-hint">暂无团队记忆</p>';
+    return;
+  }
+
+  list.innerHTML = items.map(item => `
+    <div class="memory-item">
+      <div class="memory-item-header">
+        <span class="memory-item-title">${item.title || '无标题'}</span>
+        <span class="memory-item-type">${item.memory_type || 'general'}</span>
+      </div>
+      <div class="memory-item-content">${JSON.stringify(item.content || {}, null, 2)}</div>
+      <div class="memory-item-meta">
+        <span>${item.created_by || '--'}</span>
+        <span>${item.created_at ? new Date(item.created_at).toLocaleString() : '--'}</span>
+        ${item.tags ? item.tags.map(t => `<span class="tag">${t}</span>`).join('') : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+function showCreateTeamMemory() {
+  document.getElementById('createTeamMemoryForm').style.display = 'block';
+}
+
+function hideCreateTeamMemory() {
+  document.getElementById('createTeamMemoryForm').style.display = 'none';
+}
+
+async function doCreateTeamMemory() {
+  if (!_currentTeamId) { alert('请先选择团队'); return; }
+
+  const title = document.getElementById('newMemTitle').value.trim();
+  if (!title) { alert('请输入记忆标题'); return; }
+
+  let content = {};
+  try {
+    const contentStr = document.getElementById('newMemContent').value.trim();
+    if (contentStr) content = JSON.parse(contentStr);
+  } catch (e) {
+    alert('内容JSON格式错误');
+    return;
+  }
+
+  const data = await apiPost(`/teams/${_currentTeamId}/memories`, {
+    title: title,
+    memory_type: document.getElementById('newMemType').value,
+    content: content,
+    created_by: document.getElementById('teamUserId').value.trim(),
+  });
+
+  if (data && data.success) {
+    alert('记忆创建成功！');
+    hideCreateTeamMemory();
+    document.getElementById('newMemTitle').value = '';
+    document.getElementById('newMemContent').value = '';
+    await loadTeamMemories(_currentTeamId, document.getElementById('teamUserId').value.trim());
+  } else {
+    alert('创建失败: ' + (data?.error || '未知错误'));
+  }
+}
+
+// ─── FE-4: 文档上下文 ────────────────────────────────────
+
+function initDocumentPanel() {
+  document.getElementById('docLoadBtn').addEventListener('click', loadDocuments);
+  // 默认加载
+  setTimeout(() => loadDocuments(), 500);
+}
+
+async function loadDocuments() {
+  const userId = document.getElementById('docUserId').value.trim();
+  if (!userId) { alert('请输入用户ID'); return; }
+
+  const data = await apiGet(`/documents/${userId}/recent`);
+  if (!data || data.error) {
+    document.getElementById('docList').innerHTML = `<div class="empty-state">加载失败: ${data?.error || ''}</div>`;
+    return;
+  }
+
+  const docs = data.documents || [];
+  const list = document.getElementById('docList');
+
+  if (docs.length === 0) {
+    list.innerHTML = '<div class="empty-state">该用户暂无文档记录</div>';
+    return;
+  }
+
+  list.innerHTML = docs.map(doc => `
+    <div class="doc-item" onclick="showDocumentDetail('${doc.id}')">
+      <div class="doc-item-icon ${doc.file_format}">${getDocIcon(doc.file_format)}</div>
+      <div class="doc-item-info">
+        <div class="doc-item-name">${doc.file_name}</div>
+        <div class="doc-item-summary">${doc.content_summary || '--'}</div>
+      </div>
+      <div class="doc-item-meta">
+        <span>✏️ ${doc.edit_count || 0}次</span>
+        <span>🕐 ${doc.last_accessed_at ? formatTimeAgo(doc.last_accessed_at) : '--'}</span>
+      </div>
+    </div>
+  `).join('');
+
+  // 存储文档数据供详情使用
+  window._documents = docs;
+}
+
+function getDocIcon(format) {
+  const icons = { docx: '📄', doc: '📄', pdf: '📕', txt: '📝', xlsx: '📊' };
+  return icons[format] || '📄';
+}
+
+function formatTimeAgo(isoStr) {
+  const diff = Date.now() - new Date(isoStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 60) return `${mins}分钟前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}小时前`;
+  return `${Math.floor(hours / 24)}天前`;
+}
+
+function showDocumentDetail(docId) {
+  const docs = window._documents || [];
+  const doc = docs.find(d => d.id === docId);
+  if (!doc) return;
+
+  document.getElementById('docDetail').style.display = 'block';
+  document.getElementById('docDetailName').textContent = doc.file_name;
+  document.getElementById('docDetailFormat').textContent = doc.file_format?.toUpperCase() || '--';
+  document.getElementById('docDetailSummary').textContent = doc.content_summary || '暂无摘要';
+  document.getElementById('docDetailEdits').textContent = `${doc.edit_count || 0} 次`;
+  document.getElementById('docDetailTime').textContent = formatEditTime(doc.total_edit_time || 0);
+  document.getElementById('docDetailLastAccess').textContent = doc.last_accessed_at ? new Date(doc.last_accessed_at).toLocaleString() : '--';
+  document.getElementById('docDetailSessions').textContent = (doc.associated_sessions || []).length + ' 个';
+
+  const keywords = doc.keywords || [];
+  document.getElementById('docDetailKeywords').innerHTML = keywords.length > 0
+    ? keywords.map(k => `<span class="tag">${k}</span>`).join('')
+    : '<span class="empty-hint">暂无关键词</span>';
+}
+
+function formatEditTime(seconds) {
+  if (seconds < 60) return `${seconds}秒`;
+  const mins = Math.floor(seconds / 60);
+  if (mins < 60) return `${mins}分钟`;
+  const hours = Math.floor(mins / 60);
+  return `${hours}小时${mins % 60}分钟`;
+}
+
+// ─── FE-7: 数据导出 ──────────────────────────────────────
+
+function showExportModal() {
+  const userId = document.getElementById('radarUserId').value.trim();
+  if (userId) {
+    document.getElementById('exportUserId').value = userId;
+  }
+  document.getElementById('exportModal').style.display = 'flex';
+  document.getElementById('exportResult').style.display = 'none';
+}
+
+function closeExportModal() {
+  document.getElementById('exportModal').style.display = 'none';
+}
+
+async function doExport() {
+  const userId = document.getElementById('exportUserId').value.trim();
+  if (!userId) { alert('请输入用户ID'); return; }
+
+  const format = document.getElementById('exportFormat').value;
+  const categories = [];
+  document.querySelectorAll('#exportResult').closest('.modal-body').querySelectorAll('.checkbox-group input:checked').forEach(cb => {
+    // 从模态框内获取选中的checkbox
+  });
+  // 重新获取
+  document.querySelectorAll('#exportModal .checkbox-group input:checked').forEach(cb => {
+    categories.push(cb.value);
+  });
+
+  const resultDiv = document.getElementById('exportResult');
+  resultDiv.style.display = 'block';
+  resultDiv.innerHTML = '<div class="loading">正在导出数据...</div>';
+
+  const data = await apiPost('/export', {
+    user_id: userId,
+    format: format,
+    categories: categories.length > 0 ? categories : undefined,
+  });
+
+  if (!data || !data.success) {
+    resultDiv.innerHTML = `<div class="error">导出失败: ${data?.error || '未知错误'}</div>`;
+    return;
+  }
+
+  if (data.data?.async) {
+    resultDiv.innerHTML = `<div class="success">异步导出已启动<br>任务ID: ${data.data.task_id}<br>预计大小: ${data.data.estimated_size_mb}MB<br>${data.data.message}</div>`;
+    return;
+  }
+
+  if (format === 'csv') {
+    // 下载CSV文件
+    const blob = new Blob([data.data.content], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `memory_export_${userId}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    resultDiv.innerHTML = `<div class="success">CSV导出完成，共 ${data.data.total_items} 条记录</div>`;
+  } else {
+    // 下载JSON文件
+    const blob = new Blob([JSON.stringify(data.data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `memory_export_${userId}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    resultDiv.innerHTML = `<div class="success">JSON导出完成，共 ${data.data.total_items} 条记录</div>`;
+  }
+}
+
 // ─── 系统状态 ────────────────────────────────────────────
 
 function updateStatusBadge(running) {
@@ -477,6 +854,15 @@ document.addEventListener('DOMContentLoaded', () => {
   initGraphPanel();
   initRadarPanel();
   initHeatmapPanel();
+
+  // 初始化新面板 (FE-1, FE-4)
+  initTeamPanel();
+  initDocumentPanel();
+
+  // 导出弹窗点击外部关闭
+  document.getElementById('exportModal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeExportModal();
+  });
 
   // 启动自动刷新
   startAutoRefresh();

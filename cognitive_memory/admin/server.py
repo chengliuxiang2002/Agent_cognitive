@@ -482,6 +482,195 @@ def create_admin_app(memory_manager=None) -> "FastAPI":
         users = sim.online_users
         return {"online": len(users), "users": users}
 
+    # ─── FE-1: 团队管理 API ──────────────────────────────────
+
+    @app.get("/api/admin/teams/{user_id}")
+    async def get_user_teams(user_id: str):
+        """获取用户所属团队列表"""
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"teams": [], "error": "MemoryManager 未初始化"}
+
+        try:
+            from ..storage.team_store import TeamStore
+            team_store = TeamStore(mgr._long_term._db_path)
+            teams = await team_store.get_user_teams(user_id)
+            return {"teams": [t.to_dict() for t in teams]}
+        except Exception as e:
+            return {"teams": [], "error": str(e)}
+
+    @app.post("/api/admin/teams")
+    async def admin_create_team(data: dict):
+        """创建团队"""
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"success": False, "error": "MemoryManager 未初始化"}
+
+        try:
+            from ..models.team_memory import Team, TeamMember, TeamPermission
+            from ..storage.team_store import TeamStore
+
+            team_store = TeamStore(mgr._long_term._db_path)
+            members = [TeamMember(
+                user_id=m["user_id"],
+                role=m.get("role", "member"),
+                permission=TeamPermission(m.get("permission", "view")),
+            ) for m in data.get("members", [])]
+
+            team = Team(
+                name=data["name"],
+                description=data.get("description", ""),
+                department=data.get("department", ""),
+                members=members,
+                created_by=data.get("created_by", ""),
+            )
+            await team_store.create_team(team)
+            return {"success": True, "team": team.to_dict()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @app.get("/api/admin/teams/{team_id}/memories")
+    async def get_team_memories(team_id: str, user_id: str = "", max_results: int = 50):
+        """查询团队记忆"""
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"items": [], "total": 0, "error": "MemoryManager 未初始化"}
+
+        try:
+            from ..models.team_memory import TeamMemoryQuery
+            from ..storage.team_store import TeamStore
+
+            team_store = TeamStore(mgr._long_term._db_path)
+            query = TeamMemoryQuery(
+                team_id=team_id,
+                user_id=user_id,
+                max_results=max_results,
+            )
+            result = await team_store.query_memories(query)
+            return result
+        except Exception as e:
+            return {"items": [], "total": 0, "error": str(e)}
+
+    @app.post("/api/admin/teams/{team_id}/memories")
+    async def admin_create_team_memory(team_id: str, data: dict):
+        """创建团队记忆"""
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"success": False, "error": "MemoryManager 未初始化"}
+
+        try:
+            from ..models.team_memory import TeamMemory, TeamMemoryType
+            from ..storage.team_store import TeamStore
+
+            team_store = TeamStore(mgr._long_term._db_path)
+            memory = TeamMemory(
+                team_id=team_id,
+                title=data.get("title", ""),
+                memory_type=TeamMemoryType(data.get("memory_type", "general")),
+                content=data.get("content", {}),
+                created_by=data.get("created_by", ""),
+                tags=data.get("tags", []),
+                keywords=data.get("keywords", []),
+                importance=data.get("importance", 3),
+                is_public=data.get("is_public", True),
+                allowed_members=data.get("allowed_members", []),
+            )
+            await team_store.store_memory(memory)
+            return {"success": True, "memory": memory.to_dict()}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ─── FE-4: 文档上下文 API ────────────────────────────────
+
+    @app.get("/api/admin/documents/{user_id}")
+    async def get_user_documents(user_id: str, limit: int = 20):
+        """获取用户最近文档上下文"""
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"documents": [], "error": "MemoryManager 未初始化"}
+
+        try:
+            # 从交互记录中提取文档上下文信息
+            from ..models.memory import MemoryType
+            result = await mgr.query_memories(
+                user_id=user_id,
+                max_results=limit,
+                sort_by="recent",
+            )
+            # 模拟文档上下文数据（实际应由文档跟踪模块提供）
+            documents = []
+            for item in result.items[:limit]:
+                if hasattr(item, 'content') and isinstance(item.content, dict):
+                    doc_info = item.content.get("document_context")
+                    if doc_info:
+                        documents.append(doc_info)
+            return {"documents": documents}
+        except Exception as e:
+            return {"documents": [], "error": str(e)}
+
+    @app.get("/api/admin/documents/{user_id}/recent")
+    async def get_recent_documents(user_id: str):
+        """获取用户最近编辑的5个文档"""
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"documents": [], "error": "MemoryManager 未初始化"}
+
+        try:
+            # 模拟文档数据（演示用）
+            import random
+            from datetime import datetime, timedelta
+
+            doc_templates = [
+                {"file_name": "需求文档_v2.docx", "format": "docx", "summary": "智能座舱AI系统需求规格说明"},
+                {"file_name": "架构设计文档.pdf", "format": "pdf", "summary": "认知记忆模块架构设计v2.1"},
+                {"file_name": "接口规范.docx", "format": "docx", "summary": "API接口规范文档"},
+                {"file_name": "测试报告.xlsx", "format": "xlsx", "summary": "Sprint 12 测试报告"},
+                {"file_name": "会议纪要.txt", "format": "txt", "summary": "2026-07-15 架构评审会议纪要"},
+            ]
+
+            now = datetime.now()
+            documents = []
+            for i, doc in enumerate(doc_templates):
+                edit_time = now - timedelta(hours=i * 2)
+                documents.append({
+                    "id": f"doc_{i+1}",
+                    "file_name": doc["file_name"],
+                    "file_format": doc["format"],
+                    "content_summary": doc["summary"],
+                    "last_accessed_at": edit_time.isoformat(),
+                    "edit_count": random.randint(1, 15),
+                    "total_edit_time": random.randint(60, 3600),
+                    "keywords": ["AI", "座舱", "认知"][:random.randint(1, 3)],
+                    "associated_sessions": [f"session_{random.randint(1, 100)}" for _ in range(random.randint(1, 3))],
+                })
+
+            return {"documents": documents}
+        except Exception as e:
+            return {"documents": [], "error": str(e)}
+
+    # ─── FE-7: 数据导出 API ──────────────────────────────────
+
+    @app.post("/api/admin/export")
+    async def admin_export_data(data: dict):
+        """导出用户记忆数据"""
+        mgr = app.state.memory_manager
+        if mgr is None:
+            return {"success": False, "error": "MemoryManager 未初始化"}
+
+        try:
+            from ..api.routes import MemoryAPI, ExportDataRequest
+            api = MemoryAPI(mgr)
+            request = ExportDataRequest(
+                user_id=data.get("user_id", ""),
+                format=data.get("format", "json"),
+                categories=data.get("categories", []),
+                include_metadata=data.get("include_metadata", True),
+            )
+            result = await api.export_data(request)
+            return result
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     # ─── 生命周期管理 ───────────────────────────────────
 
     @app.on_event("startup")
