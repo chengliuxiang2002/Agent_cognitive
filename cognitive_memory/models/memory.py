@@ -244,6 +244,9 @@ class SceneContext:
     estimated_arrival: Optional[datetime] = None
     trip_purpose: str = ""           # "commute", "leisure", "shopping", "school_run"
 
+    # 日历事件 (FE-3: 日程上下文感知)
+    calendar_event: Optional[dict[str, Any]] = None  # 当前关联的日历事件信息
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "timestamp": self.timestamp.isoformat(),
@@ -268,6 +271,7 @@ class SceneContext:
             "destination": self.destination,
             "estimated_arrival": self.estimated_arrival.isoformat() if self.estimated_arrival else None,
             "trip_purpose": self.trip_purpose,
+            "calendar_event": self.calendar_event,
         }
 
     def get_context_key(self) -> str:

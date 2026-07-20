@@ -12,6 +12,7 @@ from .long_term import (
     PatternStore,
     FeedbackStore,
 )
+from .team_store import TeamStore
 
 __all__ = [
     "BaseMemoryStore",
@@ -24,4 +25,5 @@ __all__ = [
     "InteractionStore",
     "PatternStore",
     "FeedbackStore",
+    "TeamStore",
 ]
