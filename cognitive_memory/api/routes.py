@@ -8,17 +8,312 @@
 - 异步非阻塞
 - 支持批量操作
 
+SC-6: API 认证集成 - Token 验证中间件、SSO/OAuth2.0 集成
+
 注意: 生产环境使用 FastAPI，此处提供 API 路由定义和接口规范。
 """
 
 from __future__ import annotations
 
+import functools
+import hashlib
+import hmac
+import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
-# ─── 请求/响应模型 ────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# SC-6: API 认证机制
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class UnauthorizedError(Exception):
+    """未认证异常"""
+    pass
+
+
+class TokenExpiredError(Exception):
+    """Token 过期异常"""
+    pass
+
+
+class AuthToken:
+    """SC-6: 认证 Token 管理
+
+    支持:
+    - Token 生成与验证 (HMAC-SHA256)
+    - Token 过期管理
+    - 从 Token 中提取 user_id
+    """
+
+    def __init__(self, secret_key: Optional[bytes] = None):
+        import os
+        self._secret_key = secret_key or os.urandom(32)
+        self._token_duration_s = 3600  # 默认 1 小时
+        self._refresh_window_s = 300   # 过期前 5 分钟可刷新
+
+    def generate_token(self, user_id: str, extra_claims: Optional[dict[str, Any]] = None) -> str:
+        """生成认证 Token
+
+        Token 格式: base64(user_id:expiry:hmac_signature)
+        """
+        expiry = int(time.time()) + self._token_duration_s
+        claims = {
+            "user_id": user_id,
+            "exp": expiry,
+            "iat": int(time.time()),
+        }
+        if extra_claims:
+            claims.update(extra_claims)
+
+        payload = f"{claims['user_id']}:{claims['exp']}:{claims['iat']}"
+        signature = self._sign(payload)
+
+        import base64
+        token_data = json.dumps(claims, ensure_ascii=False)
+        return base64.urlsafe_b64encode(token_data.encode()).decode() + "." + signature
+
+    def validate_token(self, token: str) -> dict[str, Any]:
+        """验证 Token 并返回 claims
+
+        Raises:
+            UnauthorizedError: Token 无效
+            TokenExpiredError: Token 已过期
+        """
+        import base64
+
+        try:
+            # 分离 token 数据与签名
+            parts = token.rsplit(".", 1)
+            if len(parts) != 2:
+                raise UnauthorizedError("Invalid token format")
+
+            token_data_b64, signature = parts
+            token_data = json.loads(base64.urlsafe_b64decode(token_data_b64).decode())
+
+            # 验证签名
+            payload = f"{token_data['user_id']}:{token_data['exp']}:{token_data['iat']}"
+            expected_sig = self._sign(payload)
+            if not hmac.compare_digest(signature, expected_sig):
+                raise UnauthorizedError("Invalid token signature")
+
+            # 验证过期
+            if token_data["exp"] < time.time():
+                raise TokenExpiredError("Token expired")
+
+            return token_data
+
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            raise UnauthorizedError(f"Invalid token: {e}")
+
+    def extract_user_id(self, token: str) -> str:
+        """从 Token 中提取 user_id"""
+        claims = self.validate_token(token)
+        return claims["user_id"]
+
+    def should_refresh(self, token: str) -> bool:
+        """判断 Token 是否需要刷新 (过期前5分钟内)"""
+        import base64
+        try:
+            parts = token.rsplit(".", 1)
+            token_data = json.loads(base64.urlsafe_b64decode(parts[0]).decode())
+            remaining = token_data["exp"] - time.time()
+            return 0 < remaining < self._refresh_window_s
+        except Exception:
+            return False
+
+    def refresh_token(self, token: str) -> str:
+        """刷新 Token (返回新 Token)"""
+        claims = self.validate_token(token)
+        return self.generate_token(
+            claims["user_id"],
+            extra_claims={k: v for k, v in claims.items() if k not in ("user_id", "exp", "iat")},
+        )
+
+    def _sign(self, payload: str) -> str:
+        return hmac.new(self._secret_key, payload.encode(), hashlib.sha256).hexdigest()
+
+
+class SSOAuthService:
+    """SC-6: SSO/OAuth2.0 认证服务集成
+
+    对接公司统一身份认证系统:
+    - 验证 OAuth2.0 Access Token
+    - 从 SSO 服务获取 user_id
+    - 支持 Token 缓存以减少认证请求
+    """
+
+    def __init__(self, sso_endpoint: str = "", client_id: str = "", client_secret: str = ""):
+        self._sso_endpoint = sso_endpoint
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._token_cache: dict[str, dict[str, Any]] = {}
+        self._cache_ttl = 300  # 5 分钟缓存
+
+    async def verify_sso_token(self, access_token: str) -> Optional[str]:
+        """通过 SSO 服务验证 Token 并返回 user_id
+
+        Returns:
+            user_id 或 None (验证失败)
+        """
+        # 缓存检查
+        if access_token in self._token_cache:
+            cached = self._token_cache[access_token]
+            if cached["exp"] > time.time():
+                return cached["user_id"]
+            del self._token_cache[access_token]
+
+        if not self._sso_endpoint:
+            # 未配置 SSO 时，使用本地 Token 验证
+            return None
+
+        try:
+            import urllib.request
+            import urllib.error
+
+            data = json.dumps({"token": access_token}).encode("utf-8")
+            req = urllib.request.Request(
+                f"{self._sso_endpoint}/oauth2/introspect",
+                data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self._client_secret}",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                result = json.loads(resp.read().decode())
+
+            if result.get("active", False):
+                user_id = result.get("sub") or result.get("user_id", "")
+                self._token_cache[access_token] = {
+                    "user_id": user_id,
+                    "exp": time.time() + self._cache_ttl,
+                }
+                return user_id
+
+            return None
+
+        except (urllib.error.URLError, Exception) as e:
+            import logging
+            logging.getLogger(__name__).warning(f"SSO verification failed: {e}")
+            return None
+
+    def clear_cache(self):
+        """清除 Token 缓存"""
+        self._token_cache.clear()
+
+
+class TokenAuthMiddleware:
+    """SC-6: Token 验证中间件
+
+    在 API 请求处理前进行身份验证:
+    1. 从请求头 Authorization 中提取 Bearer Token
+    2. 验证 Token 有效性
+    3. 从 Token 中提取 user_id
+    4. 替换请求参数中的 user_id
+    5. 未认证请求返回标准错误
+    """
+
+    def __init__(self, auth_token: AuthToken, sso_service: Optional[SSOAuthService] = None):
+        self._auth_token = auth_token
+        self._sso_service = sso_service
+
+    async def authenticate(self, request: Any) -> str:
+        """验证请求并返回 user_id
+
+        Raises:
+            UnauthorizedError: 未认证或 Token 无效
+            TokenExpiredError: Token 已过期
+        """
+        # 从请求头提取 Authorization
+        auth_header = getattr(request, "authorization", "") or ""
+        if not auth_header:
+            raise UnauthorizedError("Missing Authorization header")
+
+        # 解析 Bearer Token
+        if not auth_header.startswith("Bearer "):
+            raise UnauthorizedError("Invalid Authorization header format, expected Bearer token")
+
+        token = auth_header[7:]
+
+        try:
+            # 优先使用本地 Token 验证
+            return self._auth_token.extract_user_id(token)
+        except TokenExpiredError:
+            # Token 过期，尝试刷新
+            raise
+        except UnauthorizedError:
+            # 本地验证失败，尝试 SSO 验证
+            if self._sso_service:
+                user_id = await self._sso_service.verify_sso_token(token)
+                if user_id:
+                    return user_id
+            raise
+
+    @staticmethod
+    def get_standard_error_response(error: Exception) -> dict[str, Any]:
+        """SC-6: 返回标准错误响应"""
+        if isinstance(error, UnauthorizedError):
+            return {
+                "success": False,
+                "error": "UNAUTHORIZED",
+                "message": str(error),
+                "error_code": 401,
+                "timestamp": datetime.now().isoformat(),
+            }
+        elif isinstance(error, TokenExpiredError):
+            return {
+                "success": False,
+                "error": "TOKEN_EXPIRED",
+                "message": str(error),
+                "error_code": 401,
+                "timestamp": datetime.now().isoformat(),
+                "hint": "Token has expired, please refresh or re-authenticate",
+            }
+        return {
+            "success": False,
+            "error": "UNKNOWN",
+            "message": str(error),
+            "error_code": 500,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+
+def require_auth(func):
+    """SC-6: 认证装饰器 - 自动从 Token 提取 user_id
+
+    用法:
+        @require_auth
+        async def get_profile(self, request) -> ApiResponse:
+            ...
+
+    自动从请求中提取 Token，验证后将 user_id 设置到 request 对象。
+    """
+    @functools.wraps(func)
+    async def wrapper(self, request, *args, **kwargs):
+        middleware = getattr(self, "_auth_middleware", None)
+        if middleware is None:
+            # 无认证中间件时跳过验证
+            return await func(self, request, *args, **kwargs)
+
+        try:
+            user_id = await middleware.authenticate(request)
+            # 将认证后的 user_id 设置到 request (如果 request 有 user_id 属性)
+            if hasattr(request, "user_id"):
+                request.user_id = user_id
+            request._auth_user_id = user_id
+            return await func(self, request, *args, **kwargs)
+        except (UnauthorizedError, TokenExpiredError) as e:
+            return ApiResponse(
+                success=False,
+                error=TokenAuthMiddleware.get_standard_error_response(e),
+            )
+
+    return wrapper
+
 
 @dataclass
 class RecordInteractionRequest:
@@ -162,6 +457,8 @@ class ApiResponse:
 class MemoryAPI:
     """认知记忆模块 API
 
+    SC-6: 支持 Token 认证中间件集成
+
     接口规范:
 
     POST /api/v1/memory/interactions
@@ -248,10 +545,65 @@ class MemoryAPI:
     GET /api/v1/team/{team_id}/memories
         - 查询团队记忆
         - Query: ?user_id=xxx&memory_type=xxx
-        - Response: list[TeamMemory]"""
+        - Response: list[TeamMemory]
 
-    def __init__(self, memory_manager):
+    SC-6 新增:
+    POST /api/v1/auth/token
+        - 生成认证 Token
+        - Request: {"user_id": "xxx"}
+        - Response: {"token": "xxx", "expires_in": 3600}
+
+    POST /api/v1/auth/refresh
+        - 刷新 Token
+        - Request: {"token": "xxx"}
+        - Response: {"token": "xxx", "expires_in": 3600}"""
+
+    def __init__(
+        self,
+        memory_manager,
+        auth_token: Optional[AuthToken] = None,
+        sso_service: Optional[SSOAuthService] = None,
+    ):
         self._manager = memory_manager
+        self._auth_token = auth_token
+        self._auth_middleware: Optional[TokenAuthMiddleware] = None
+
+        if auth_token:
+            self._auth_middleware = TokenAuthMiddleware(auth_token, sso_service)
+
+    # ─── SC-6: 认证相关接口 ─────────────────────────────
+
+    async def generate_auth_token(self, user_id: str) -> ApiResponse:
+        """SC-6: 生成认证 Token"""
+        if not self._auth_token:
+            return ApiResponse(success=False, error="Auth service not configured")
+        try:
+            token = self._auth_token.generate_token(user_id)
+            return ApiResponse(success=True, data={
+                "token": token,
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            })
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
+
+    async def refresh_auth_token(self, token: str) -> ApiResponse:
+        """SC-6: 刷新认证 Token"""
+        if not self._auth_token:
+            return ApiResponse(success=False, error="Auth service not configured")
+        try:
+            if self._auth_token.should_refresh(token):
+                new_token = self._auth_token.refresh_token(token)
+                return ApiResponse(success=True, data={
+                    "token": new_token,
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                })
+            return ApiResponse(success=False, error="Token does not need refresh")
+        except (TokenExpiredError, UnauthorizedError) as e:
+            return ApiResponse(success=False, error=str(e))
+        except Exception as e:
+            return ApiResponse(success=False, error=str(e))
 
     async def record_interaction(
         self, request: RecordInteractionRequest

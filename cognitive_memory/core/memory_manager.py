@@ -20,9 +20,10 @@ MemoryManager 是认知记忆模块的中央编排器，负责:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from ..models.memory import (
@@ -60,6 +61,20 @@ from .context_engine import ContextEngine
 logger = logging.getLogger(__name__)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# SC-7: 数据保留策略配置
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 数据保留策略: 重要性级别 -> 保留天数
+DATA_RETENTION_POLICY: dict[MemoryImportance, int] = {
+    MemoryImportance.TRANSIENT: 7,     # 7天
+    MemoryImportance.LOW: 90,          # 90天
+    MemoryImportance.MEDIUM: 365,      # 365天
+    MemoryImportance.HIGH: -1,         # 永久保留
+    MemoryImportance.CRITICAL: -1,     # 永久保留
+}
+
+
 class MemoryManager:
     """认知记忆管理器 - 模块核心编排器
 
@@ -69,6 +84,7 @@ class MemoryManager:
     - 短期记忆容量: 500条/用户
     - 长期记忆容量: 无限制（受数据库容量限制）
     - 画像更新频率: 每次新交互后增量更新
+    - SC-7: 数据保留策略 - TRANSIENT 7天, LOW 90天, MEDIUM 365天, HIGH/CRITICAL 永久
     """
 
     def __init__(
@@ -105,7 +121,14 @@ class MemoryManager:
 
         # 后台任务
         self._maintenance_task: Optional[asyncio.Task] = None
+        self._retention_task: Optional[asyncio.Task] = None  # SC-7
         self._running = False
+
+        # SC-7: 数据保留清理日志
+        self._retention_log: list[dict[str, Any]] = []
+
+        # SC-7: 数据备份存储 (内存备份，生产环境可替换为文件/S3)
+        self._data_backup: dict[str, dict[str, Any]] = {}
 
     # ─── 公共接口 ─────────────────────────────────────────
 
@@ -281,7 +304,7 @@ class MemoryManager:
         logger.info("Memory maintenance started")
 
     async def stop_maintenance(self):
-        """停止后台维护任务 (PF-1: 同时停止写入缓冲)"""
+        """停止后台维护任务 (PF-1: 同时停止写入缓冲, SC-7: 停止保留策略)"""
         self._running = False
         if self._maintenance_task:
             self._maintenance_task.cancel()
@@ -293,6 +316,9 @@ class MemoryManager:
         # PF-1: 停止 LongTermMemoryStore 的写入缓冲和 Redis 连接
         if hasattr(self._long_term, 'stop'):
             await self._long_term.stop()
+
+        # SC-7: 停止数据保留策略
+        await self.stop_retention_policy()
 
         logger.info("Memory maintenance stopped")
 
@@ -330,6 +356,199 @@ class MemoryManager:
                 consolidated = self._consolidator.consolidate(item, self._decay_engine)
                 await self._long_term.store(consolidated)
                 logger.debug(f"Consolidated memory: {item.id}")
+
+    # ─── SC-7: 数据保留策略 ─────────────────────────────
+
+    async def start_retention_policy(self, interval_seconds: int = 86400):
+        """SC-7: 启动数据保留策略定时任务
+
+        默认每天执行一次 (86400s = 24h)。
+        独立于维护任务，可单独启停。
+        """
+        if self._retention_task is not None:
+            return
+
+        self._retention_task = asyncio.create_task(
+            self._retention_loop(interval_seconds)
+        )
+        logger.info(f"Data retention policy started, interval={interval_seconds}s")
+
+    async def stop_retention_policy(self):
+        """SC-7: 停止数据保留策略"""
+        if self._retention_task:
+            self._retention_task.cancel()
+            try:
+                await self._retention_task
+            except asyncio.CancelledError:
+                pass
+            self._retention_task = None
+        logger.info("Data retention policy stopped")
+
+    async def _retention_loop(self, interval_seconds: int):
+        """SC-7: 数据保留循环"""
+        while self._retention_task is not None:
+            try:
+                await asyncio.sleep(interval_seconds)
+                await self._execute_retention_cleanup()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Retention cleanup error: {e}")
+
+    async def _execute_retention_cleanup(self) -> dict[str, Any]:
+        """SC-7: 执行数据保留策略清理
+
+        根据 MemoryImportance 级别自动清理过期数据:
+        - TRANSIENT: 7天
+        - LOW: 90天
+        - MEDIUM: 365天
+        - HIGH/CRITICAL: 永久保留
+
+        清理流程:
+        1. 遍历所有用户数据
+        2. 根据重要性判断是否过期
+        3. 过期数据先备份
+        4. 执行删除
+        5. 记录清理日志
+        """
+        cleanup_stats = {
+            "timestamp": datetime.now().isoformat(),
+            "total_cleaned": 0,
+            "by_level": {},
+            "backed_up": 0,
+        }
+
+        now = datetime.now()
+
+        for importance, retention_days in DATA_RETENTION_POLICY.items():
+            if retention_days < 0:
+                # 永久保留，跳过
+                continue
+
+            cutoff = now - timedelta(days=retention_days)
+            cleaned_count = await self._cleanup_by_importance(
+                importance, cutoff
+            )
+            if cleaned_count > 0:
+                cleanup_stats["by_level"][importance.value] = cleaned_count
+                cleanup_stats["total_cleaned"] += cleaned_count
+
+        # 记录清理日志
+        self._retention_log.append(cleanup_stats)
+        if cleanup_stats["total_cleaned"] > 0:
+            logger.info(
+                f"Data retention cleanup completed: "
+                f"cleaned={cleanup_stats['total_cleaned']}, "
+                f"backed_up={cleanup_stats['backed_up']}"
+            )
+
+        return cleanup_stats
+
+    async def _cleanup_by_importance(
+        self, importance: MemoryImportance, cutoff: datetime
+    ) -> int:
+        """SC-7: 按重要性级别清理过期数据
+
+        包括:
+        1. 备份即将删除的数据
+        2. 执行删除
+        """
+        cleaned = 0
+
+        # 清理长期记忆
+        result = await self._long_term.query(
+            MemoryQuery(user_id="", max_results=10000)
+        )
+        lt_memories = result.items
+        for item in lt_memories:
+            if item.importance == importance and item.created_at < cutoff:
+                # 备份数据
+                self._backup_data(item.id, item.to_dict())
+                # 删除
+                await self._long_term.delete(item.id)
+                cleaned += 1
+
+        # 清理交互记录
+        interactions = await self._interaction_store.get_recent("", limit=10000)
+        for interaction in interactions:
+            if interaction.timestamp < cutoff:
+                self._backup_data(interaction.id, interaction.to_dict())
+                await self._interaction_store.delete(interaction.id)
+                cleaned += 1
+
+        return cleaned
+
+    def _backup_data(self, data_id: str, data: dict[str, Any]):
+        """SC-7: 清理前备份数据"""
+        self._data_backup[data_id] = {
+            "data": data,
+            "backed_up_at": datetime.now().isoformat(),
+        }
+
+    def get_retention_log(self) -> list[dict[str, Any]]:
+        """SC-7: 获取数据保留策略清理日志"""
+        return self._retention_log
+
+    def get_backup_data(self, data_id: str) -> Optional[dict[str, Any]]:
+        """SC-7: 获取备份数据"""
+        return self._data_backup.get(data_id)
+
+    async def restore_data(self, data_id: str) -> bool:
+        """SC-7: 数据恢复机制
+
+        从备份中恢复已删除的数据。
+        """
+        backup = self._data_backup.get(data_id)
+        if not backup:
+            logger.warning(f"Restore failed: no backup for {data_id}")
+            return False
+
+        data = backup["data"]
+        # 尝试恢复为 MemoryItem
+        try:
+            item = MemoryItem(
+                id=data.get("id", data_id),
+                user_id=data.get("user_id", ""),
+                memory_type=MemoryType(data.get("memory_type", "long_term")),
+                content=data.get("content", {}),
+                importance=MemoryImportance(data.get("importance", 3)),
+                created_at=datetime.fromisoformat(data.get("created_at", datetime.now().isoformat())),
+                tags=data.get("tags", []),
+                confidence=data.get("confidence", 1.0),
+            )
+            await self._long_term.store(item)
+            logger.info(f"Data restored: {data_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Restore failed for {data_id}: {e}")
+            return False
+
+    async def get_retention_due_items(self) -> list[dict[str, Any]]:
+        """SC-7: 获取即将被清理的数据列表 (预览)"""
+        due_items = []
+        now = datetime.now()
+
+        for importance, retention_days in DATA_RETENTION_POLICY.items():
+            if retention_days < 0:
+                continue
+            cutoff = now - timedelta(days=retention_days)
+            # 使用 query 方法获取所有用户的数据
+            result = await self._long_term.query(
+                MemoryQuery(user_id="", max_results=10000)
+            )
+            lt_memories = result.items
+            for item in lt_memories:
+                if item.importance == importance and item.created_at < cutoff:
+                    due_items.append({
+                        "data_id": item.id,
+                        "user_id": item.user_id,
+                        "importance": importance.value,
+                        "created_at": item.created_at.isoformat(),
+                        "retention_days": retention_days,
+                        "expired_at": (item.created_at + timedelta(days=retention_days)).isoformat(),
+                    })
+
+        return due_items
 
     # ─── 内部方法 ─────────────────────────────────────────
 

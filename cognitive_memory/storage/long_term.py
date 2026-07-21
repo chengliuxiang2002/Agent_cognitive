@@ -47,6 +47,7 @@ from ..models.memory import (
     BehaviorPattern,
     SceneContext,
 )
+from ..core.privacy import TieredEncryption
 
 logger = logging.getLogger(__name__)
 
@@ -298,12 +299,13 @@ class RedisCache:
 
 
 class LongTermMemoryStore(BaseMemoryStore):
-    """长期记忆存储 - SQLite 实现 (含 PF-1~PF-4 性能优化)
+    """长期记忆存储 - SQLite 实现 (含 PF-1~PF-4 性能优化 + SC-3 分级存储)
 
     PF-1: 写入缓冲批量提交 - WriteBuffer 异步批量写入
     PF-2: SQLite 连接池 - ConnectionPool 复用连接
     PF-3: Redis 缓存层 - RedisCache 热点数据缓存
     PF-4: FTS5 全文索引 - SQLite FTS5 加速关键词搜索
+    SC-3: 数据分级存储 - CRITICAL/HIGH加密, TRANSIENT仅内存
     """
 
     # 批量写入 SQL 模板
@@ -321,6 +323,7 @@ class LongTermMemoryStore(BaseMemoryStore):
         write_buffer_size: int = 50,
         write_buffer_interval_ms: int = 100,
         pool_size: int = 3,
+        encryption_key: Optional[bytes] = None,
     ):
         self._db_path = db_path
 
@@ -341,6 +344,12 @@ class LongTermMemoryStore(BaseMemoryStore):
 
         # PF-4: FTS5 支持标记
         self._fts5_available = False
+
+        # SC-3: 分级加密存储
+        self._tiered_encryption = TieredEncryption(encryption_key=encryption_key)
+
+        # SC-3: 仅内存存储的 TRANSIENT 数据缓存
+        self._transient_store: dict[str, MemoryItem] = {}
 
         self._init_db()
 
@@ -529,11 +538,41 @@ class LongTermMemoryStore(BaseMemoryStore):
     # ─── PF-1+PF-2: 优化的 store ────────────────────────
 
     async def store(self, item: MemoryItem) -> bool:
-        """写入记忆 (通过 WriteBuffer 异步批量提交)"""
+        """写入记忆 (通过 WriteBuffer 异步批量提交 + SC-3 分级存储)
+
+        SC-3 分级策略:
+        - TRANSIENT: 仅内存存储，不持久化
+        - CRITICAL/HIGH: 端到端加密存储
+        - MEDIUM/LOW: 明文持久化存储
+        """
+        # SC-3: TRANSIENT 数据仅保存在内存中
+        if not self._tiered_encryption.should_persist(item.importance):
+            self._transient_store[item.id] = item
+            logger.debug(f"TRANSIENT memory stored in-memory: {item.id}")
+            return True
+
+        # SC-3: CRITICAL/HIGH 数据加密后存储
+        if self._tiered_encryption.should_encrypt(item.importance):
+            item = self._encrypt_item_content(item)
+
         # PF-5: 预计算相关性分数
         relevance = self._compute_relevance_score(item)
         await self._write_buffer.add((item, relevance))
         return True
+
+    def _encrypt_item_content(self, item: MemoryItem) -> MemoryItem:
+        """SC-3: 加密 MemoryItem 的 content 字段"""
+        encrypted_content = self._tiered_encryption.encrypt_if_needed(
+            item.content, item.importance
+        )
+        item.content = encrypted_content
+        return item
+
+    def _decrypt_item_content(self, item: MemoryItem) -> MemoryItem:
+        """SC-3: 解密 MemoryItem 的 content 字段"""
+        if isinstance(item.content, dict) and item.content.get("_encrypted", False):
+            item.content = self._tiered_encryption.decrypt_if_needed(item.content)
+        return item
 
     async def _batch_store(self, batch: list[tuple[MemoryItem, float]]):
         """批量写入回调 (由 WriteBuffer 触发)"""
@@ -635,6 +674,10 @@ class LongTermMemoryStore(BaseMemoryStore):
     # ─── PF-2+PF-3: 优化的 retrieve ─────────────────────
 
     async def retrieve(self, memory_id: str) -> Optional[MemoryItem]:
+        # SC-3: 先检查 TRANSIENT 内存缓存
+        if memory_id in self._transient_store:
+            return self._transient_store[memory_id]
+
         # PF-1: 查询前先刷新写入缓冲
         await self._write_buffer._flush()
 
@@ -645,6 +688,8 @@ class LongTermMemoryStore(BaseMemoryStore):
             ).fetchone()
             if row:
                 item = self._row_to_item(row)
+                # SC-3: 解密 CRITICAL/HIGH 数据
+                item = self._decrypt_item_content(item)
                 # 更新访问记录
                 conn.execute(
                     """UPDATE long_term_memories
@@ -671,9 +716,14 @@ class LongTermMemoryStore(BaseMemoryStore):
 
         # PF-4: 关键词搜索优先使用 FTS5
         if query.keywords and self._fts5_available:
-            return await self._fts5_query(query, start_time)
+            result = await self._fts5_query(query, start_time)
+        else:
+            result = await self._standard_query(query, start_time)
 
-        return await self._standard_query(query, start_time)
+        # SC-3: 解密所有返回的 CRITICAL/HIGH 数据
+        result.items = [self._decrypt_item_content(item) for item in result.items]
+
+        return result
 
     async def _standard_query(self, query: MemoryQuery, start_time: float) -> MemoryRetrievalResult:
         """标准 SQL 查询 (使用预计算 relevance_score 索引)"""
