@@ -436,7 +436,7 @@ class TestGeneralization:
         for n in range(1, 21):
             scene = scenes[n % 3]
             await memory_manager.record_interaction(make_interaction(
-                user_id, "navigate", {"destination": f"地点{n % 5 + 1}"}, scene,
+                user_id, "navigate", {"destination": f"地点{n % 2 + 1}"}, scene,
             ))
 
             if n >= 5 and n % 5 == 0:

@@ -125,6 +125,10 @@ class WriteBuffer:
         async with self._lock:
             await self._flush_locked()
 
+    async def flush(self):
+        """公共接口: 强制刷新缓冲区"""
+        await self._flush()
+
     async def _flush_locked(self):
         """在已持有锁的情况下执行刷新 (内部方法)"""
         if not self._buffer:
@@ -151,13 +155,14 @@ class WriteBuffer:
 
 
 class ConnectionPool:
-    """SQLite 连接池
+    """SQLite 连接池 (async-safe)
 
     复用连接而非每次创建新连接，减少连接开销。
     在 WAL 模式下支持读写并发，通过连接复用提升吞吐量。
+    acquire() 使用 asyncio.to_thread 避免阻塞事件循环。
     """
 
-    def __init__(self, db_path: str, pool_size: int = 3):
+    def __init__(self, db_path: str, pool_size: int = 10):
         self._db_path = db_path
         self._pool_size = pool_size
         self._pool: list[sqlite3.Connection] = []
@@ -173,9 +178,22 @@ class ConnectionPool:
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def acquire(self) -> sqlite3.Connection:
-        """获取一个连接 (阻塞直到可用)"""
+    def acquire_sync(self) -> sqlite3.Connection:
+        """同步获取连接 (用于 __init__ 等非异步上下文)"""
         self._semaphore.acquire()
+        with self._lock:
+            if self._pool:
+                conn = self._pool.pop()
+                try:
+                    conn.execute("SELECT 1")
+                except sqlite3.Error:
+                    conn = self._create_conn()
+                return conn
+            return self._create_conn()
+
+    async def acquire(self) -> sqlite3.Connection:
+        """异步获取连接 (不阻塞事件循环)"""
+        await asyncio.to_thread(self._semaphore.acquire)
         with self._lock:
             if self._pool:
                 conn = self._pool.pop()
@@ -322,7 +340,7 @@ class LongTermMemoryStore(BaseMemoryStore):
         redis_url: str = "",
         write_buffer_size: int = 50,
         write_buffer_interval_ms: int = 100,
-        pool_size: int = 3,
+        pool_size: int = 10,
         encryption_key: Optional[bytes] = None,
     ):
         self._db_path = db_path
@@ -356,7 +374,7 @@ class LongTermMemoryStore(BaseMemoryStore):
     # ─── PF-2: 连接池辅助方法 ───────────────────────────
 
     def _acquire_conn(self) -> sqlite3.Connection:
-        return self._pool.acquire()
+        return self._pool.acquire_sync()
 
     def _release_conn(self, conn: sqlite3.Connection):
         self._pool.release(conn)
@@ -979,11 +997,11 @@ class ProfileStore(BaseProfileStore):
 
     def __init__(self, db_path: str = "cognitive_memory.db", pool: Optional[ConnectionPool] = None):
         self._db_path = db_path
-        self._pool = pool or ConnectionPool(db_path, pool_size=2)
+        self._pool = pool or ConnectionPool(db_path, pool_size=10)
         self._ensure_table()
 
     def _acquire_conn(self) -> sqlite3.Connection:
-        return self._pool.acquire()
+        return self._pool.acquire_sync()
 
     def _release_conn(self, conn: sqlite3.Connection):
         self._pool.release(conn)
@@ -1066,11 +1084,11 @@ class InteractionStore(BaseInteractionStore):
 
     def __init__(self, db_path: str = "cognitive_memory.db", pool: Optional[ConnectionPool] = None):
         self._db_path = db_path
-        self._pool = pool or ConnectionPool(db_path, pool_size=2)
+        self._pool = pool or ConnectionPool(db_path, pool_size=10)
         self._ensure_table()
 
     def _acquire_conn(self) -> sqlite3.Connection:
-        return self._pool.acquire()
+        return self._pool.acquire_sync()
 
     def _release_conn(self, conn: sqlite3.Connection):
         self._pool.release(conn)
@@ -1211,11 +1229,11 @@ class PatternStore(BasePatternStore):
 
     def __init__(self, db_path: str = "cognitive_memory.db", pool: Optional[ConnectionPool] = None):
         self._db_path = db_path
-        self._pool = pool or ConnectionPool(db_path, pool_size=2)
+        self._pool = pool or ConnectionPool(db_path, pool_size=10)
         self._ensure_table()
 
     def _acquire_conn(self) -> sqlite3.Connection:
-        return self._pool.acquire()
+        return self._pool.acquire_sync()
 
     def _release_conn(self, conn: sqlite3.Connection):
         self._pool.release(conn)
@@ -1362,11 +1380,11 @@ class FeedbackStore:
 
     def __init__(self, db_path: str = "cognitive_memory.db", pool: Optional[ConnectionPool] = None):
         self._db_path = db_path
-        self._pool = pool or ConnectionPool(db_path, pool_size=2)
+        self._pool = pool or ConnectionPool(db_path, pool_size=10)
         self._ensure_table()
 
     def _acquire_conn(self) -> sqlite3.Connection:
-        return self._pool.acquire()
+        return self._pool.acquire_sync()
 
     def _release_conn(self, conn: sqlite3.Connection):
         self._pool.release(conn)

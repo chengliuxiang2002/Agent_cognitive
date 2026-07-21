@@ -450,14 +450,26 @@ class ContextEngine:
     def _pattern_matches_context(
         self, pattern: BehaviorPattern, context: SceneContext
     ) -> bool:
-        """检查行为模式是否匹配当前场景"""
+        """检查行为模式是否匹配当前场景
+
+        支持两种匹配模式:
+        1. 精确匹配: 单字段 (time_of_day, weather 等) 要求完全一致
+        2. 模糊匹配: context_key 使用场景相似度计算，支持跨场景迁移
+        """
         triggers = pattern.trigger_conditions
         if not triggers:
             return True  # 无条件的模式始终匹配
 
         for key, expected_value in triggers.items():
             if key == "context_key":
-                if context.get_context_key() != expected_value:
+                # 使用场景相似度进行模糊匹配，支持跨场景迁移
+                pattern_ctx = self._parse_context_key(expected_value)
+                if pattern_ctx is not None:
+                    similarity = self.calculate_context_similarity(pattern_ctx, context)
+                    # 相似度 ≥ 0.5 视为匹配 (只需 weather/location 等部分一致)
+                    if similarity < 0.5:
+                        return False
+                elif context.get_context_key() != expected_value:
                     return False
             elif key == "time_of_day":
                 if context.time_of_day != expected_value:

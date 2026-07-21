@@ -14,6 +14,7 @@ PF-6: 异步画像构建 - 使用 asyncio.gather 分块并行处理
 from __future__ import annotations
 
 import asyncio
+import statistics
 from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Optional
@@ -128,7 +129,7 @@ class UserProfileBuilder:
         chunk_results = await asyncio.gather(*tasks)
         all_temps = [t for chunk in chunk_results for t in chunk]
         if all_temps:
-            profile.temperature_preference = sum(all_temps) / len(all_temps)
+            profile.temperature_preference = statistics.median(all_temps)
         return profile
 
     async def _extract_music_preference_async(
@@ -279,7 +280,7 @@ class UserProfileBuilder:
         """从行为模式更新用户画像"""
         profile = await self._profile_store.get_profile(user_id)
         if profile is None:
-            return None
+            profile = UserProfile(user_id=user_id)
 
         for pattern in patterns:
             if pattern.confidence < 0.5:
@@ -342,7 +343,7 @@ class UserProfileBuilder:
                     pass
 
         if temps:
-            profile.temperature_preference = sum(temps) / len(temps)
+            profile.temperature_preference = statistics.median(temps)
         return profile
 
     def _extract_music_preference(
