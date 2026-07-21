@@ -268,15 +268,20 @@ class MemoryManager:
     # ─── 后台维护 ─────────────────────────────────────────
 
     async def start_maintenance(self, interval_seconds: int = 300):
-        """启动后台维护任务"""
+        """启动后台维护任务 (PF-1: 同时启动写入缓冲)"""
         self._running = True
+
+        # PF-1: 启动 LongTermMemoryStore 的写入缓冲和 Redis 连接
+        if hasattr(self._long_term, 'start'):
+            await self._long_term.start()
+
         self._maintenance_task = asyncio.create_task(
             self._maintenance_loop(interval_seconds)
         )
         logger.info("Memory maintenance started")
 
     async def stop_maintenance(self):
-        """停止后台维护任务"""
+        """停止后台维护任务 (PF-1: 同时停止写入缓冲)"""
         self._running = False
         if self._maintenance_task:
             self._maintenance_task.cancel()
@@ -284,6 +289,11 @@ class MemoryManager:
                 await self._maintenance_task
             except asyncio.CancelledError:
                 pass
+
+        # PF-1: 停止 LongTermMemoryStore 的写入缓冲和 Redis 连接
+        if hasattr(self._long_term, 'stop'):
+            await self._long_term.stop()
+
         logger.info("Memory maintenance stopped")
 
     async def _maintenance_loop(self, interval_seconds: int):
@@ -361,7 +371,11 @@ class MemoryManager:
     def _sort_by_relevance(
         self, items: list[MemoryItem], sort_by: str
     ) -> list[MemoryItem]:
-        """按相关性排序"""
+        """按相关性排序 (PF-5: 预计算 relevance_score 优化)
+
+        数据库层面已通过 relevance_score 索引完成排序，
+        此处仅处理合并后的内存排序场景，使用缓存的计算结果。
+        """
         if sort_by == "recency":
             return sorted(items, key=lambda x: x.last_accessed_at, reverse=True)
         elif sort_by == "strength":
@@ -369,12 +383,13 @@ class MemoryManager:
         elif sort_by == "importance":
             return sorted(items, key=lambda x: x.importance.value, reverse=True)
         else:
+            # PF-5: 使用预计算相关性分数 (与 LongTermMemoryStore._compute_relevance_score 保持一致)
             return sorted(
                 items,
                 key=lambda x: (
                     x.strength * 0.4
-                    + (x.importance.value / 5) * 0.3
-                    + min(x.access_count / 10, 1.0) * 0.3
+                    + (x.importance.value / 5.0) * 0.3
+                    + min(x.access_count / 10.0, 1.0) * 0.3
                 ),
                 reverse=True,
             )

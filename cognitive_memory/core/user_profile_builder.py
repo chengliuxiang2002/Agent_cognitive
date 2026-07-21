@@ -7,10 +7,13 @@
 - 从行为模式中聚合特征
 - 画像置信度评估
 - 渐进式画像更新
+
+PF-6: 异步画像构建 - 使用 asyncio.gather 分块并行处理
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Optional
@@ -29,7 +32,11 @@ class UserProfileBuilder:
     """用户画像构建器
 
     支持冷启动: 通过 ColdStartEngine 为新用户初始化画像。
+    PF-6: 特征提取使用 asyncio.gather 并行处理，分块大小 50。
     """
+
+    # PF-6: 分块大小
+    _CHUNK_SIZE = 50
 
     def __init__(
         self,
@@ -45,7 +52,7 @@ class UserProfileBuilder:
     async def build_profile(
         self, user_id: str, department: str = "", role: str = ""
     ) -> UserProfile:
-        """构建或更新用户画像
+        """构建或更新用户画像 (PF-6: 异步并行优化)
 
         冷启动策略:
         - 如果用户无交互数据，使用 ColdStartEngine 初始化画像
@@ -73,13 +80,24 @@ class UserProfileBuilder:
                 await self._profile_store.save_profile(profile)
             return profile
 
-        # 提取各类特征
-        profile = self._extract_temperature_preference(profile, interactions)
-        profile = self._extract_music_preference(profile, interactions)
-        profile = self._extract_destination_patterns(profile, interactions)
-        profile = self._extract_driving_mode_preference(profile, interactions)
-        profile = self._extract_interaction_style(profile, interactions)
-        profile = self._extract_active_hours(profile, interactions)
+        # PF-6: 使用 asyncio.gather 并行提取各类特征
+        chunks = self._split_into_chunks(interactions, self._CHUNK_SIZE)
+        results = await asyncio.gather(
+            self._extract_temperature_preference_async(profile, chunks),
+            self._extract_music_preference_async(profile, chunks),
+            self._extract_destination_patterns_async(profile, chunks),
+            self._extract_driving_mode_preference_async(profile, chunks),
+            self._extract_interaction_style_async(profile, chunks),
+            self._extract_active_hours_async(profile, chunks),
+        )
+
+        # 合并并行结果
+        profile = results[0]
+        profile = self._merge_music_preference(profile, results[1])
+        profile = self._merge_destinations(profile, results[2])
+        profile = self._merge_driving_mode(profile, results[3])
+        profile = self._merge_interaction_style(profile, results[4])
+        profile = self._merge_active_hours(profile, results[5])
 
         # 更新画像元数据
         profile.data_points_count = len(interactions)
@@ -91,6 +109,168 @@ class UserProfileBuilder:
         # 保存更新后的画像
         await self._profile_store.save_profile(profile)
 
+        return profile
+
+    # ─── PF-6: 分块工具方法 ──────────────────────────────
+
+    @staticmethod
+    def _split_into_chunks(items: list, chunk_size: int) -> list[list]:
+        """将列表分块"""
+        return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+    # ─── PF-6: 异步并行特征提取方法 ──────────────────────
+
+    async def _extract_temperature_preference_async(
+        self, profile: UserProfile, chunks: list[list[InteractionRecord]]
+    ) -> UserProfile:
+        """异步提取温度偏好 (分块并行)"""
+        tasks = [asyncio.to_thread(self._extract_temps_from_chunk, chunk) for chunk in chunks]
+        chunk_results = await asyncio.gather(*tasks)
+        all_temps = [t for chunk in chunk_results for t in chunk]
+        if all_temps:
+            profile.temperature_preference = sum(all_temps) / len(all_temps)
+        return profile
+
+    async def _extract_music_preference_async(
+        self, profile: UserProfile, chunks: list[list[InteractionRecord]]
+    ) -> dict:
+        """异步提取音乐偏好 (返回 Counter)"""
+        tasks = [asyncio.to_thread(self._extract_genres_from_chunk, chunk) for chunk in chunks]
+        chunk_results = await asyncio.gather(*tasks)
+        all_genres = [g for chunk in chunk_results for g in chunk]
+        return dict(Counter(all_genres))
+
+    async def _extract_destination_patterns_async(
+        self, profile: UserProfile, chunks: list[list[InteractionRecord]]
+    ) -> dict:
+        """异步提取目的地模式 (返回 Counter)"""
+        tasks = [asyncio.to_thread(self._extract_dests_from_chunk, chunk) for chunk in chunks]
+        chunk_results = await asyncio.gather(*tasks)
+        all_dests = [d for chunk in chunk_results for d in chunk]
+        return dict(Counter(all_dests))
+
+    async def _extract_driving_mode_preference_async(
+        self, profile: UserProfile, chunks: list[list[InteractionRecord]]
+    ) -> dict:
+        """异步提取驾驶模式偏好 (返回 Counter)"""
+        tasks = [asyncio.to_thread(self._extract_modes_from_chunk, chunk) for chunk in chunks]
+        chunk_results = await asyncio.gather(*tasks)
+        all_modes = [m for chunk in chunk_results for m in chunk]
+        return dict(Counter(all_modes))
+
+    async def _extract_interaction_style_async(
+        self, profile: UserProfile, chunks: list[list[InteractionRecord]]
+    ) -> dict:
+        """异步提取交互风格 (返回 Counter)"""
+        tasks = [asyncio.to_thread(self._extract_styles_from_chunk, chunk) for chunk in chunks]
+        chunk_results = await asyncio.gather(*tasks)
+        all_styles = [s for chunk in chunk_results for s in chunk]
+        return dict(Counter(all_styles))
+
+    async def _extract_active_hours_async(
+        self, profile: UserProfile, chunks: list[list[InteractionRecord]]
+    ) -> dict:
+        """异步提取活跃时段 (返回 Counter)"""
+        tasks = [asyncio.to_thread(self._extract_hours_from_chunk, chunk) for chunk in chunks]
+        chunk_results = await asyncio.gather(*tasks)
+        all_hours = [h for chunk in chunk_results for h in chunk]
+        return dict(Counter(all_hours))
+
+    # ─── PF-6: 分块处理函数 (在线程池中执行) ─────────────
+
+    @staticmethod
+    def _extract_temps_from_chunk(chunk: list[InteractionRecord]) -> list[float]:
+        temps = []
+        for r in chunk:
+            temp = r.processed_input.get("temperature")
+            if temp is not None:
+                try:
+                    temps.append(float(temp))
+                except (ValueError, TypeError):
+                    pass
+        return temps
+
+    @staticmethod
+    def _extract_genres_from_chunk(chunk: list[InteractionRecord]) -> list[str]:
+        genres = []
+        for r in chunk:
+            genre = r.processed_input.get("genre")
+            if genre:
+                genres.append(genre)
+        return genres
+
+    @staticmethod
+    def _extract_dests_from_chunk(chunk: list[InteractionRecord]) -> list[str]:
+        dests = []
+        for r in chunk:
+            if r.intent == "navigate":
+                dest = r.processed_input.get("destination", "")
+                if dest:
+                    dests.append(dest)
+        return dests
+
+    @staticmethod
+    def _extract_modes_from_chunk(chunk: list[InteractionRecord]) -> list[str]:
+        modes = []
+        for r in chunk:
+            mode = r.processed_input.get("driving_mode")
+            if mode:
+                modes.append(mode)
+        return modes
+
+    @staticmethod
+    def _extract_styles_from_chunk(chunk: list[InteractionRecord]) -> list[str]:
+        styles = []
+        for r in chunk:
+            style = r.processed_input.get("interaction_style")
+            if style:
+                styles.append(style)
+        return styles
+
+    @staticmethod
+    def _extract_hours_from_chunk(chunk: list[InteractionRecord]) -> list[int]:
+        hours = []
+        for r in chunk:
+            try:
+                hour = r.timestamp.hour
+                hours.append(hour)
+            except AttributeError:
+                pass
+        return hours
+
+    # ─── PF-6: 合并并行结果 ──────────────────────────────
+
+    def _merge_music_preference(self, profile: UserProfile, genre_counts: dict) -> UserProfile:
+        sorted_genres = sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)
+        profile.music_preferences = [g for g, _ in sorted_genres[:5]]
+        return profile
+
+    def _merge_destinations(self, profile: UserProfile, dest_counts: dict) -> UserProfile:
+        sorted_dests = sorted(dest_counts.items(), key=lambda x: x[1], reverse=True)
+        profile.common_destinations = [
+            {"name": d, "frequency": c}
+            for d, c in sorted_dests[:10]
+        ]
+        return profile
+
+    def _merge_driving_mode(self, profile: UserProfile, mode_counts: dict) -> UserProfile:
+        if mode_counts:
+            top_mode = max(mode_counts, key=mode_counts.get)
+            profile.driving_mode_preference = top_mode
+        return profile
+
+    def _merge_interaction_style(self, profile: UserProfile, style_counts: dict) -> UserProfile:
+        if style_counts:
+            top_style = max(style_counts, key=style_counts.get)
+            profile.interaction_style = top_style
+        return profile
+
+    def _merge_active_hours(self, profile: UserProfile, hour_counts: dict) -> UserProfile:
+        sorted_hours = sorted(hour_counts.items(), key=lambda x: x[1], reverse=True)
+        profile.active_hours = [
+            {"hour": h, "activity_count": c}
+            for h, c in sorted_hours[:8]
+        ]
         return profile
 
     async def update_from_patterns(
