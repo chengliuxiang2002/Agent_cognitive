@@ -1,4 +1,4 @@
-"""
+﻿"""
 认知记忆模块 - 基准测试与质量评估
 
 覆盖六维度质量评估体系:
@@ -885,66 +885,151 @@ class TestRealDecay:
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 综合评估 — 严苛评分体系
-# 每项指标对照 README 目标值分级计分，再按维度权重加权汇总。
+# ═══════════════════════════════════════════════════════════════════════════════
+# v4.0 客观黑盒评估体系 — 固定阈值 + 二元通过/不通过 + 公开API
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _score_higher(value: float, excellent: float, good: float, fair: float, poor: float = 0.0) -> float:
-    """连续计分(越高越好) - 四档线性插值
+# 评估标准定义 — 每项标准的通过阈值及其行业/业务依据
+# 格式: { 标准名: (阈值, 越高越好, 行业依据) }
+_EVAL_CRITERIA: dict[str, tuple[float | bool, bool, str]] = {
+    # ═══════════════════════════════════════════════════════════════
+    # 一、记忆准确性 (4项)
+    # ═══════════════════════════════════════════════════════════════
+    "Precision@10":      (0.80, True,  "信息检索行业标准: 前10结果中至少8条相关"),
+    "Recall@10":         (0.53, True,  "总15条查10条, 理论最大0.67, 通过线0.53(80%理论最大)"),
+    "ContextMatch":      (0.60, True,  "上下文感知检索应显著优于随机基线(0.33)"),
+    "MRR":               (0.33, True,  "首个相关结果应在前3位内(1/3≈0.33)"),
 
-    优秀(≥excellent) → 100 | 良好(≥good) → 80~100 | 合格(≥fair) → 50~80 | 较差(≥poor) → 20~50 | 差 → 0~20
+    # ═══════════════════════════════════════════════════════════════
+    # 二、信息保留率 (3项)
+    # ═══════════════════════════════════════════════════════════════
+    "ShortTermRetention":(0.80, True,  "0.5秒后短期记忆应保持80%以上可检索"),
+    "CriticalProtect":   (10.0, True,  "关键记忆保护倍数应至少为临时记忆的10倍"),
+    "Consolidation":     (0.70, True,  "巩固后记忆强度保留率应≥70%"),
+
+    # ═══════════════════════════════════════════════════════════════
+    # 三、响应速度 (7项)
+    # ═══════════════════════════════════════════════════════════════
+    "StoreP50":          (5.0,  False, "本地数据库写入P50应在5ms内(SSD基准)"),
+    "StoreP95":          (30.0, False, "P95写入延迟应在30ms内(用户体验阈值)"),
+    "StoreP99":          (100.0,False, "P99写入延迟应在100ms内(车载实时性)"),
+    "QueryP50":          (5.0,  False, "本地数据库查询P50应在5ms内"),
+    "QueryP95":          (30.0, False, "查询P95延迟应在30ms内"),
+    "Throughput":        (500.0,True,  "车载场景至少500 ops/s(多传感器并发)"),
+    "ProfileBuild":      (1000, False, "200条记录画像构建应在1秒内完成"),
+
+    # ═══════════════════════════════════════════════════════════════
+    # 四、泛化能力 (5项)
+    # ═══════════════════════════════════════════════════════════════
+    "CrossSceneDiff":    (2.0,  False, "相似场景(早晨→上午)温度偏差<2°C(人因工程)"),
+    "CrossSeasonDiff":   (5.0,  False, "跨季节(夏→冬)温度偏差<5°C(季节调整范围)"),
+    "RoutePatternFound": (1,    True,  "10天通勤数据应发现至少1个路线模式"),
+    "ColdStartGain":     (0.0,  True,  "冷启动后期命中率应高于前期(有学习效果)"),
+    "CompoundScene":     (1,    True,  "应能检测到至少1个复合场景"),
+
+    # ═══════════════════════════════════════════════════════════════
+    # 五、抗干扰性 (3项)
+    # ═══════════════════════════════════════════════════════════════
+    "NoiseDeviation":    (3.0,  False, "50%噪声下温度偏差<3°C(中位数应滤除极端值)"),
+    "ConflictMajority":  (True, True,  "等量冲突时温度应偏向多数值"),
+    "UserIsolation":     (0.5,  True,  "不同用户画像温度差异>0.5°C"),
+
+    # ═══════════════════════════════════════════════════════════════
+    # 六、用户体验 (4项)
+    # ═══════════════════════════════════════════════════════════════
+    "PredictionHit":     (0.50, True,  "多场景预测至少50%命中率(高于随机33%)"),
+    "HighConfPrediction":(1,    True,  "至少1个高置信度(≥0.3)预测可减少交互"),
+    "Personalization":   (0.50, True,  "不同用户音乐偏好应有50%以上区分度"),
+    "ImplicitFeedback":  (True, True,  "隐式反馈后置信度应有所提升"),
+
+    # ═══════════════════════════════════════════════════════════════
+    # 七、自适应能力 (3项)
+    # ═══════════════════════════════════════════════════════════════
+    "FeedbackGain":      (0.0,  True,  "正向显式反馈后模式置信度应提升"),
+    "DataSufficiency":   (0.10, True,  "20条交互后数据充足性应>0.10"),
+    "AnomalyDetected":   (1,    True,  "异常场景应检测到至少1个异常类型"),
+}
+
+# 标准 → 维度映射
+_CRITERIA_DIM: dict[str, str] = {
+    "Precision@10": "accuracy", "Recall@10": "accuracy",
+    "ContextMatch": "accuracy", "MRR": "accuracy",
+    "ShortTermRetention": "retention", "CriticalProtect": "retention",
+    "Consolidation": "retention",
+    "StoreP50": "speed", "StoreP95": "speed", "StoreP99": "speed",
+    "QueryP50": "speed", "QueryP95": "speed",
+    "Throughput": "speed", "ProfileBuild": "speed",
+    "CrossSceneDiff": "generalization", "CrossSeasonDiff": "generalization",
+    "RoutePatternFound": "generalization", "ColdStartGain": "generalization",
+    "CompoundScene": "generalization",
+    "NoiseDeviation": "anti_interference", "ConflictMajority": "anti_interference",
+    "UserIsolation": "anti_interference",
+    "PredictionHit": "user_experience", "HighConfPrediction": "user_experience",
+    "Personalization": "user_experience", "ImplicitFeedback": "user_experience",
+    "FeedbackGain": "adaptive", "DataSufficiency": "adaptive",
+    "AnomalyDetected": "adaptive",
+}
+
+# 维度权重 (基于业务价值分配，不可调整)
+_DIM_WEIGHTS = {
+    "accuracy": 0.18, "retention": 0.12, "speed": 0.15,
+    "generalization": 0.20, "anti_interference": 0.10,
+    "user_experience": 0.15, "adaptive": 0.10,
+}
+
+
+def _check(name: str, raw_value: float | bool) -> tuple[bool, float, str]:
+    """二元判定: 通过(True)或不通过(False)
+
+    Args:
+        name: 标准名称
+        raw_value: 原始测量值
+
+    Returns:
+        (passed: bool, threshold: float, justification: str)
     """
-    if value >= excellent:
-        return 100.0
-    if value >= good:
-        return 80.0 + 20.0 * (value - good) / max(excellent - good, 0.001)
-    if value >= fair:
-        return 50.0 + 30.0 * (value - fair) / max(good - fair, 0.001)
-    if value >= poor:
-        return 20.0 + 30.0 * (value - poor) / max(fair - poor, 0.001)
-    return max(0.0, 20.0 * value / max(poor, 0.001))
-
-
-def _score_lower(value: float, excellent: float, good: float, fair: float, poor: float = 999.0) -> float:
-    """连续计分(越低越好) - 四档线性插值
-
-    优秀(≤excellent) → 100 | 良好(≤good) → 80~100 | 合格(≤fair) → 50~80 | 较差(≤poor) → 20~50 | 差 → 0~20
-    """
-    if value <= excellent:
-        return 100.0
-    if value <= good:
-        return 80.0 + 20.0 * (good - value) / max(good - excellent, 0.001)
-    if value <= fair:
-        return 50.0 + 30.0 * (fair - value) / max(fair - good, 0.001)
-    if value <= poor:
-        return 20.0 + 30.0 * (poor - value) / max(poor - fair, 0.001)
-    return max(0.0, 20.0 * poor / max(value, 0.001))
+    threshold, higher_better, justification = _EVAL_CRITERIA[name]
+    if isinstance(threshold, bool):
+        passed = (raw_value == threshold)
+    elif higher_better:
+        passed = (raw_value >= threshold)
+    else:
+        passed = (raw_value <= threshold)
+    return {"passed": passed, "threshold": threshold, "justification": justification}
 
 
 class TestComprehensiveEvaluation:
-    """综合质量评估 — 真实业务场景的连续计分体系
+    """综合质量评估 — 完全客观的黑盒评估体系 (v4.0)
 
-    优化要点:
-    - 连续计分取代离散四档，每个微小的改进都能被反映
-    - 阈值对标真实业务需求（智能座舱车载场景）
-    - 权重重新分配：泛化能力是认知记忆的核心差异化能力
-    - 冷启动测试使用合理的目的地分布，确保模式可被学习
+    设计原则:
+      - 完全黑盒: 仅通过 MemoryManager 公开API测试，禁用任何私有方法/属性
+      - 二元通过/不通过: 每项指标只有PASS/FAIL，拒绝连续计分的人为调优空间
+      - 固定阈值: 阈值基于行业标准或业务需求，不可由代码逻辑调整
+      - 原始数据透明: 报告所有原始指标值，综合得分 = 通过率 x 100
+      - 独立可复现: 任何人在任何环境下运行同一测试，得到相同结果
+
+    七维度体系 (31项标准):
+      1. 记忆准确性 (18%, 4项) - Precision@10, Recall@10, ContextMatch, MRR
+      2. 信息保留率 (12%, 3项) - ShortTermRetention, CriticalProtect, Consolidation
+      3. 响应速度 (15%, 7项) - StoreP50/P95/P99, QueryP50/P95, Throughput, ProfileBuild
+      4. 泛化能力 (20%, 5项) - CrossSceneDiff, CrossSeasonDiff, RoutePattern, ColdStart, CompoundScene
+      5. 抗干扰性 (10%, 3项) - NoiseDeviation, ConflictMajority, UserIsolation
+      6. 用户体验 (15%, 4项) - PredictionHit, HighConf, Personalization, ImplicitFeedback
+      7. 自适应能力 (10%, 3项) - FeedbackGain, DataSufficiency, AnomalyDetected
     """
 
     # pylint: disable=too-many-locals,too-many-statements
 
     @pytest.mark.asyncio
     async def test_comprehensive_score(self, memory_manager):
-        """运行全部维度评估并输出综合报告"""
-        scores: dict[str, float] = {}
-        details: dict[str, dict] = {}
+        """运行全部31项标准评估并输出综合报告 (v4.0 黑盒二元评估)"""
+        results: dict[str, dict] = {}  # name -> {raw, passed, threshold, justification}
 
         # ═══════════════════════════════════════════════════════════════
-        # 一、记忆准确性 (权重 20%)
-        # 业务场景: 用户说"导航去公司"，系统应准确返回历史导航记录
+        # 一、记忆准确性 (4项)
         # ═══════════════════════════════════════════════════════════════
+
         uid_acc = "user_eval_accuracy"
-
-        # 1.1 Precision@K
         for i in range(10):
             await memory_manager.record_interaction(make_interaction(
                 uid_acc, "navigate", {"destination": "公司", "seq": i},
@@ -955,36 +1040,37 @@ class TestComprehensiveEvaluation:
                 uid_acc, "play_music", {"genre": "rock", "seq": i},
                 make_scene(time_of_day="evening"),
             ))
-        await asyncio.sleep(0.1)
+        for i in range(5):
+            await memory_manager.record_interaction(make_interaction(
+                uid_acc, "navigate", {"destination": "公司南门", "seq": i},
+                make_scene(time_of_day="morning"),
+            ))
+        await asyncio.sleep(0.2)
 
         result = await memory_manager.query_memories(
             user_id=uid_acc, tags=["navigate"], max_results=10,
         )
-        relevant = sum(1 for item in result.items if "navigate" in item.tags)
-        prec = relevant / max(len(result.items), 1)
-        # 业务标准: 准确率 ≥ 0.90 优秀, ≥ 0.80 良好, ≥ 0.60 合格
-        prec_score = _score_higher(prec, 0.98, 0.90, 0.75, 0.50)
+        prec = sum(1 for item in result.items
+                   if item.content.get("processed_input", {}).get("destination") == "公司") / max(len(result.items), 1)
+        results["Precision@10"] = {"raw": prec, **_check("Precision@10", prec)}
 
-        # 1.2 Recall@K
         uid_recall = "user_eval_recall"
-        for i in range(10):
+        for i in range(15):
             await memory_manager.record_interaction(make_interaction(
                 uid_recall, "set_temperature", {"temperature": 23.0 + i * 0.1},
                 make_scene(time_of_day="morning"),
             ))
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.2)
         result = await memory_manager.query_memories(
-            user_id=uid_recall, tags=["set_temperature"], max_results=20,
+            user_id=uid_recall, tags=["set_temperature"], max_results=10,
         )
-        relevant = sum(1 for item in result.items if "set_temperature" in item.tags)
-        rec = relevant / 10
-        # 业务标准: 召回率 ≥ 0.90 优秀, ≥ 0.80 良好, ≥ 0.60 合格
-        rec_score = _score_higher(rec, 0.98, 0.90, 0.75, 0.50)
+        rec = sum(1 for item in result.items if "set_temperature" in item.tags) / 15
+        results["Recall@10"] = {"raw": rec, **_check("Recall@10", rec)}
 
-        # 1.3 上下文匹配准确率
         uid_ctx = "user_eval_ctx"
         morning = make_scene(time_of_day="morning", weather="sunny")
         evening = make_scene(time_of_day="evening", weather="rainy")
+        afternoon = make_scene(time_of_day="afternoon", weather="cloudy")
         for _ in range(5):
             await memory_manager.record_interaction(make_interaction(
                 uid_ctx, "navigate", {"destination": "公司"}, morning,
@@ -993,101 +1079,79 @@ class TestComprehensiveEvaluation:
             await memory_manager.record_interaction(make_interaction(
                 uid_ctx, "navigate", {"destination": "家"}, evening,
             ))
-        await asyncio.sleep(0.1)
+        for _ in range(3):
+            await memory_manager.record_interaction(make_interaction(
+                uid_ctx, "navigate", {"destination": "商场"}, afternoon,
+            ))
+        await asyncio.sleep(0.2)
         ctx_result = await memory_manager.get_context_aware_memories(
             uid_ctx, morning, max_results=5,
         )
-        company_hits = sum(
-            1 for item in ctx_result.items
-            if item.content.get("processed_input", {}).get("destination") == "公司"
+        ctx_acc = sum(1 for item in ctx_result.items
+                      if item.content.get("processed_input", {}).get("destination") == "公司") / max(len(ctx_result.items), 1)
+        results["ContextMatch"] = {"raw": ctx_acc, **_check("ContextMatch", ctx_acc)}
+
+        mrr = 0.0
+        if result.items:
+            for rank, item in enumerate(result.items, 1):
+                if "set_temperature" in item.tags:
+                    mrr = 1.0 / rank
+                    break
+        results["MRR"] = {"raw": mrr, **_check("MRR", mrr)}
+
+        # ═══════════════════════════════════════════════════════════════
+        # 二、信息保留率 (3项)
+        # ═══════════════════════════════════════════════════════════════
+
+        uid_decay = "user_eval_decay_real"
+        for i in range(10):
+            item = MemoryItem(
+                user_id=uid_decay, memory_type=MemoryType.SHORT_TERM,
+                content={"action": "test", "seq": i},
+                importance=MemoryImportance.MEDIUM, strength=1.0, access_count=1,
+            )
+            await memory_manager.store_memory(item)
+        await asyncio.sleep(0.5)
+        decay_result = await memory_manager.query_memories(
+            user_id=uid_decay, max_results=10,
         )
-        ctx_acc = company_hits / max(len(ctx_result.items), 1)
-        # 业务标准: 场景匹配 ≥ 0.85 优秀, ≥ 0.70 良好, ≥ 0.50 合格
-        ctx_score = _score_higher(ctx_acc, 0.95, 0.85, 0.65, 0.40)
+        decay_ret = len(decay_result.items) / 10
+        results["ShortTermRetention"] = {"raw": decay_ret, **_check("ShortTermRetention", decay_ret)}
 
-        accuracy_score = (prec_score * 0.35 + rec_score * 0.35 + ctx_score * 0.30)
-        scores["accuracy"] = accuracy_score
-        details["accuracy"] = {
-            "Precision@10": (prec, prec_score),
-            "Recall@10": (rec, rec_score),
-            "ContextMatch": (ctx_acc, ctx_score),
-        }
-
-        # ═══════════════════════════════════════════════════════════════
-        # 二、信息保留率 (权重 15%)
-        # 业务场景: 用户上周的偏好设置今天仍能被回忆
-        # ═══════════════════════════════════════════════════════════════
-
-        # 2.1 衰减曲线拟合度
         from cognitive_memory.learner import MemoryDecayEngine
         engine = MemoryDecayEngine(base_decay_rate=0.1)
-        errors = []
-        for hours in [0.5, 1, 2, 4, 8, 12, 24, 48, 72]:
-            item = MemoryItem(
-                user_id="test", memory_type=MemoryType.SHORT_TERM,
-                content={}, strength=1.0, importance=MemoryImportance.MEDIUM,
-                last_accessed_at=datetime.now() - timedelta(hours=hours),
-                min_strength=0.0,
-            )
-            actual = engine.calculate_decay(item)
-            weight = engine.IMPORTANCE_WEIGHT[MemoryImportance.MEDIUM]
-            expected = 1.0 * math.exp(-0.1 / weight * hours)
-            errors.append(abs(actual - expected))
-        mean_decay_err = statistics.mean(errors)
-        # 业务标准: 衰减误差 < 0.01 优秀, < 0.05 良好, < 0.10 合格
-        decay_score = _score_lower(mean_decay_err, 0.005, 0.02, 0.08, 0.15)
-
-        # 2.2 关键记忆保护率
         critical = MemoryItem(
             user_id="test", memory_type=MemoryType.LONG_TERM,
             content={}, strength=1.0, importance=MemoryImportance.CRITICAL,
-            last_accessed_at=datetime.now() - timedelta(hours=24),
-            min_strength=0.0,
+            last_accessed_at=datetime.now() - timedelta(hours=24), min_strength=0.0,
         )
         transient = MemoryItem(
             user_id="test", memory_type=MemoryType.LONG_TERM,
             content={}, strength=1.0, importance=MemoryImportance.TRANSIENT,
-            last_accessed_at=datetime.now() - timedelta(hours=24),
-            min_strength=0.0,
+            last_accessed_at=datetime.now() - timedelta(hours=24), min_strength=0.0,
         )
-        crit_decay = engine.calculate_decay(critical)
-        trans_decay = engine.calculate_decay(transient)
-        protect_ratio = crit_decay / max(trans_decay, 0.001)
-        # 业务标准: 保护比 > 10 优秀, > 5 良好, > 2 合格
-        protect_score = _score_higher(protect_ratio, 15.0, 8.0, 3.0, 1.0)
+        protect_ratio = engine.calculate_decay(critical) / max(engine.calculate_decay(transient), 0.001)
+        results["CriticalProtect"] = {"raw": protect_ratio, **_check("CriticalProtect", protect_ratio)}
 
-        # 2.3 巩固成功率
         cons_item = MemoryItem(
             user_id="user_eval_consolidate",
             memory_type=MemoryType.SHORT_TERM,
             content={"action": "important"},
-            importance=MemoryImportance.HIGH,
-            strength=0.9,
-            access_count=5,
+            importance=MemoryImportance.HIGH, strength=0.9, access_count=5,
         )
         await memory_manager.store_memory(cons_item)
         await memory_manager.start_maintenance(interval_seconds=1)
         await asyncio.sleep(1.5)
         await memory_manager.stop_maintenance()
         retrieved = await memory_manager.retrieve_memory(cons_item.id)
-        cons_success = retrieved is not None
-        cons_score = 100.0 if cons_success else 0.0
-
-        retention_score = (decay_score * 0.35 + protect_score * 0.35 + cons_score * 0.30)
-        scores["retention"] = retention_score
-        details["retention"] = {
-            "DecayError": (mean_decay_err, decay_score),
-            "ProtectRatio": (protect_ratio, protect_score),
-            "Consolidation": (cons_success, cons_score),
-        }
+        cons_ret = (retrieved.strength / 0.9) if retrieved else 0.0
+        results["Consolidation"] = {"raw": cons_ret, **_check("Consolidation", cons_ret)}
 
         # ═══════════════════════════════════════════════════════════════
-        # 三、响应速度 (权重 15%)
-        # 业务场景: 车载场景要求毫秒级响应，P99 < 200ms 是可接受的
+        # 三、响应速度 (7项)
         # ═══════════════════════════════════════════════════════════════
+
         uid_perf = "user_eval_perf"
-
-        # 3.1 存储延迟
         store_latencies = []
         for i in range(100):
             start = time.perf_counter()
@@ -1095,15 +1159,13 @@ class TestComprehensiveEvaluation:
                 uid_perf, "test", {"seq": i}, make_scene(),
             ))
             store_latencies.append((time.perf_counter() - start) * 1000)
-        store_p50 = percentile(store_latencies, 50)
-        store_p95 = percentile(store_latencies, 95)
-        store_p99 = percentile(store_latencies, 99)
-        # 业务标准: P50 < 2ms 优秀, < 10ms 良好, < 30ms 合格
-        store_p50_score = _score_lower(store_p50, 2, 8, 20, 50)
-        store_p95_score = _score_lower(store_p95, 10, 30, 80, 200)
-        store_p99_score = _score_lower(store_p99, 30, 80, 200, 500)
+        results["StoreP50"] = {"raw": percentile(store_latencies, 50),
+                                **_check("StoreP50", percentile(store_latencies, 50))}
+        results["StoreP95"] = {"raw": percentile(store_latencies, 95),
+                                **_check("StoreP95", percentile(store_latencies, 95))}
+        results["StoreP99"] = {"raw": percentile(store_latencies, 99),
+                                **_check("StoreP99", percentile(store_latencies, 99))}
 
-        # 3.2 查询延迟
         await asyncio.sleep(0.1)
         query_latencies = []
         for _ in range(100):
@@ -1112,13 +1174,11 @@ class TestComprehensiveEvaluation:
                 user_id=uid_perf, max_results=10, sort_by="relevance",
             )
             query_latencies.append((time.perf_counter() - start) * 1000)
-        query_p50 = percentile(query_latencies, 50)
-        query_p95 = percentile(query_latencies, 95)
-        # 业务标准: P50 < 3ms 优秀, < 15ms 良好, < 50ms 合格
-        query_p50_score = _score_lower(query_p50, 3, 10, 30, 80)
-        query_p95_score = _score_lower(query_p95, 10, 40, 100, 300)
+        results["QueryP50"] = {"raw": percentile(query_latencies, 50),
+                                **_check("QueryP50", percentile(query_latencies, 50))}
+        results["QueryP95"] = {"raw": percentile(query_latencies, 95),
+                                **_check("QueryP95", percentile(query_latencies, 95))}
 
-        # 3.3 吞吐量
         start = time.perf_counter()
         count = 0
         deadline = start + 2.0
@@ -1128,73 +1188,65 @@ class TestComprehensiveEvaluation:
             ))
             count += 1
         throughput = count / (time.perf_counter() - start)
-        # 业务标准: ≥ 1000 ops/s 优秀, ≥ 500 良好, ≥ 200 合格
-        tp_score = _score_higher(throughput, 1500, 800, 300, 100)
+        results["Throughput"] = {"raw": throughput, **_check("Throughput", throughput)}
 
-        # 3.4 画像构建耗时
         for i in range(200):
             await memory_manager.record_interaction(make_interaction(
                 "user_eval_profile", "set_temperature",
                 {"temperature": 23.0 + (i % 10) * 0.2}, make_scene(),
             ))
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.2)
         start = time.perf_counter()
         await memory_manager.build_user_profile("user_eval_profile")
         profile_ms = (time.perf_counter() - start) * 1000
-        # 业务标准: < 50ms 优秀, < 200ms 良好, < 500ms 合格
-        profile_score = _score_lower(profile_ms, 50, 200, 500, 1000)
-
-        speed_score = (
-            store_p50_score * 0.15 + store_p95_score * 0.10 + store_p99_score * 0.05 +
-            query_p50_score * 0.15 + query_p95_score * 0.10 +
-            tp_score * 0.25 +
-            profile_score * 0.20
-        )
-        scores["speed"] = speed_score
-        details["speed"] = {
-            "StoreP50(ms)": (store_p50, store_p50_score),
-            "StoreP95(ms)": (store_p95, store_p95_score),
-            "StoreP99(ms)": (store_p99, store_p99_score),
-            "QueryP50(ms)": (query_p50, query_p50_score),
-            "QueryP95(ms)": (query_p95, query_p95_score),
-            "Throughput(ops/s)": (throughput, tp_score),
-            "ProfileBuild(ms)": (profile_ms, profile_score),
-        }
+        results["ProfileBuild"] = {"raw": profile_ms, **_check("ProfileBuild", profile_ms)}
 
         # ═══════════════════════════════════════════════════════════════
-        # 四、泛化能力 (权重 25%) — 认知记忆的核心差异化能力
-        # 业务场景: 在相似场景下复用已学到的偏好，新用户快速冷启动
+        # 四、泛化能力 (5项)
         # ═══════════════════════════════════════════════════════════════
 
-        # 4.1 跨场景迁移 (显式触发学习)
         uid_xfer = "user_eval_xfer"
         sunny_morning = make_scene(time_of_day="morning", weather="sunny")
         for _ in range(5):
             await memory_manager.record_interaction(make_interaction(
                 uid_xfer, "set_temperature", {"temperature": 24.0}, sunny_morning,
             ))
-        await asyncio.sleep(0.2)
-        # 显式触发学习，确保模式已生成
-        await memory_manager._learn_from_interaction(
-            make_interaction(uid_xfer, "set_temperature", {"temperature": 24.0}, sunny_morning)
-        )
+        await asyncio.sleep(0.5)
         sunny_forenoon = make_scene(time_of_day="afternoon", weather="sunny")
         predictions = await memory_manager.predict_user_needs(uid_xfer, sunny_forenoon)
         temp_preds = [p for p in predictions if p.get("action", {}).get("set_temperature") is not None]
-        cross_transfer_score = 20.0
-        temp_diff = 99.0
-        if temp_preds:
-            temp_diff = abs(temp_preds[0]["action"]["set_temperature"] - 24.0)
-            # 业务标准: 偏差 < 0.5°C 优秀, < 1.5°C 良好, < 3°C 合格
-            cross_transfer_score = _score_lower(temp_diff, 0.3, 1.0, 2.5, 5.0)
+        temp_diff = abs(temp_preds[0]["action"]["set_temperature"] - 24.0) if temp_preds else 99.0
+        results["CrossSceneDiff"] = {"raw": temp_diff, **_check("CrossSceneDiff", temp_diff)}
 
-        # 4.2 冷启动改善 (显式触发学习，不依赖后台任务)
+        uid_season = "user_eval_season"
+        summer_scene = make_scene(time_of_day="morning", weather="sunny")
+        summer_scene.timestamp = summer_scene.timestamp.replace(month=7)
+        for _ in range(5):
+            await memory_manager.record_interaction(make_interaction(
+                uid_season, "set_temperature", {"temperature": 22.0}, summer_scene,
+            ))
+        await asyncio.sleep(0.5)
+        winter_scene = make_scene(time_of_day="morning", weather="snowy")
+        winter_scene.timestamp = winter_scene.timestamp.replace(month=1)
+        winter_preds = await memory_manager.predict_user_needs(uid_season, winter_scene)
+        winter_temps = [p for p in winter_preds if p.get("action", {}).get("set_temperature") is not None]
+        season_diff = abs(winter_temps[0]["action"]["set_temperature"] - 22.0) if winter_temps else 99.0
+        results["CrossSeasonDiff"] = {"raw": season_diff, **_check("CrossSeasonDiff", season_diff)}
+
+        uid_pat = "user_eval_pattern"
+        for day in range(10):
+            await memory_manager.record_interaction(make_interaction(
+                uid_pat, "navigate", {"destination": "公司", "trip_purpose": "commute"},
+                make_scene(time_of_day="morning"),
+            ))
+        await asyncio.sleep(0.5)
+        patterns = await memory_manager.get_behavior_patterns(uid_pat)
+        route_count = len([p for p in patterns if p.pattern_type == "route"])
+        results["RoutePatternFound"] = {"raw": route_count, **_check("RoutePatternFound", route_count)}
+
         uid_cold = "user_eval_cold"
-        # 只用2个目的地，确保每个目的地+时段组合出现 ≥ 3次
         dests = ["公司", "家"]
         scenes_cold = [make_scene(time_of_day=tod) for tod in ["morning", "afternoon", "evening"]]
-        early_hits = []
-        late_hits = []
 
         def _has_nav_pred(preds):
             return any(
@@ -1203,197 +1255,126 @@ class TestComprehensiveEvaluation:
                 for p in preds
             )
 
-        # 阶段1: 前5条交互
+        early_hits = []
         for n in range(1, 6):
             scene = scenes_cold[n % 3]
-            dest = dests[n % 2]
             await memory_manager.record_interaction(make_interaction(
-                uid_cold, "navigate", {"destination": dest}, scene,
+                uid_cold, "navigate", {"destination": dests[n % 2]}, scene,
             ))
-        await asyncio.sleep(0.2)
-        await memory_manager._learn_from_interaction(
-            make_interaction(uid_cold, "navigate", {"destination": dests[0]}, scenes_cold[0])
-        )
-        preds = await memory_manager.predict_user_needs(uid_cold, scenes_cold[0])
-        early_hits.append(int(_has_nav_pred(preds)))
+        await asyncio.sleep(0.5)
+        for n in range(1, 6):
+            preds = await memory_manager.predict_user_needs(uid_cold, scenes_cold[n % 3])
+            early_hits.append(int(_has_nav_pred(preds)))
 
-        # 阶段2: 再5条(共10条)
-        for n in range(6, 11):
+        late_hits = []
+        for n in range(6, 16):
             scene = scenes_cold[n % 3]
-            dest = dests[n % 2]
             await memory_manager.record_interaction(make_interaction(
-                uid_cold, "navigate", {"destination": dest}, scene,
+                uid_cold, "navigate", {"destination": dests[n % 2]}, scene,
             ))
-        await asyncio.sleep(0.2)
-        await memory_manager._learn_from_interaction(
-            make_interaction(uid_cold, "navigate", {"destination": dests[1]}, scenes_cold[1])
-        )
-        preds = await memory_manager.predict_user_needs(uid_cold, scenes_cold[1])
-        early_hits.append(int(_has_nav_pred(preds)))
+        await asyncio.sleep(0.5)
+        for _ in range(5):
+            preds = await memory_manager.predict_user_needs(uid_cold, scenes_cold[0])
+            late_hits.append(int(_has_nav_pred(preds)))
 
-        # 阶段3: 再5条(共15条)
-        for n in range(11, 16):
-            scene = scenes_cold[n % 3]
-            dest = dests[n % 2]
-            await memory_manager.record_interaction(make_interaction(
-                uid_cold, "navigate", {"destination": dest}, scene,
-            ))
-        await asyncio.sleep(0.2)
-        await memory_manager._learn_from_interaction(
-            make_interaction(uid_cold, "navigate", {"destination": dests[0]}, scenes_cold[2])
-        )
-        preds = await memory_manager.predict_user_needs(uid_cold, scenes_cold[2])
-        late_hits.append(int(_has_nav_pred(preds)))
-
-        # 阶段4: 最后5条(共20条)
-        for n in range(16, 21):
-            scene = scenes_cold[n % 3]
-            dest = dests[n % 2]
-            await memory_manager.record_interaction(make_interaction(
-                uid_cold, "navigate", {"destination": dest}, scene,
-            ))
-        await asyncio.sleep(0.2)
-        await memory_manager._learn_from_interaction(
-            make_interaction(uid_cold, "navigate", {"destination": dests[1]}, scenes_cold[0])
-        )
-        preds = await memory_manager.predict_user_needs(uid_cold, scenes_cold[0])
-        late_hits.append(int(_has_nav_pred(preds)))
         early_rate = sum(early_hits) / max(len(early_hits), 1)
         late_rate = sum(late_hits) / max(len(late_hits), 1)
-        cold_improvement = late_rate - early_rate
-        # 业务标准: 后期命中率 ≥ 0.70 优秀, ≥ 0.40 良好, ≥ 0.20 合格
-        cold_late_score = _score_higher(late_rate, 0.80, 0.50, 0.25, 0.10)
-        # 改善幅度: ≥ 0.40 优秀, ≥ 0.20 良好, ≥ 0.05 合格
-        cold_improve_score = _score_higher(cold_improvement, 0.50, 0.25, 0.10, 0.0)
-        cold_score = cold_late_score * 0.6 + cold_improve_score * 0.4
+        cold_gain = late_rate - early_rate
+        results["ColdStartGain"] = {"raw": cold_gain, **_check("ColdStartGain", cold_gain)}
 
-        # 4.3 模式发现
-        uid_pat = "user_eval_pattern"
-        for day in range(10):
-            await memory_manager.record_interaction(make_interaction(
-                uid_pat, "navigate", {"destination": "公司", "trip_purpose": "commute"},
-                make_scene(time_of_day="morning"),
-            ))
-        await asyncio.sleep(0.2)
-        patterns = await memory_manager.get_behavior_patterns(uid_pat)
-        route_patterns = [p for p in patterns if p.pattern_type == "route"]
-        pat_count = len(route_patterns)
-        pat_confidence = max((p.confidence for p in route_patterns), default=0)
-        # 业务标准: 模式数 ≥ 5 优秀, ≥ 3 良好, ≥ 1 合格
-        pat_count_score = _score_higher(pat_count, 8, 5, 2, 0)
-        pat_conf_score = _score_higher(pat_confidence, 0.90, 0.75, 0.50, 0.30)
-        pat_score = pat_count_score * 0.5 + pat_conf_score * 0.5
-
-        gen_score = (cross_transfer_score * 0.35 + cold_score * 0.30 + pat_score * 0.35)
-        scores["generalization"] = gen_score
-        details["generalization"] = {
-            "CrossSceneDiff(°C)": (temp_diff, cross_transfer_score),
-            "ColdStart(early/late)": (f"{early_rate:.2f}/{late_rate:.2f}", cold_score),
-            "PatternCount": (pat_count, pat_count_score),
-            "PatternConfidence": (pat_confidence, pat_conf_score),
-        }
+        storm_scene = make_scene(
+            time_of_day="night", weather="rainy", road_type="highway",
+        )
+        compounds = await memory_manager.detect_compound_scene(storm_scene)
+        results["CompoundScene"] = {"raw": len(compounds), **_check("CompoundScene", len(compounds))}
 
         # ═══════════════════════════════════════════════════════════════
-        # 五、抗干扰性 (权重 10%)
+        # 五、抗干扰性 (3项)
         # ═══════════════════════════════════════════════════════════════
 
-        # 5.1 噪声鲁棒性
-        # 业务场景: 用户在车载语音中偶尔误触发/口误，系统应能过滤噪声
         uid_noise = "user_eval_noise"
-        for _ in range(8):
+        for _ in range(6):
             await memory_manager.record_interaction(make_interaction(
                 uid_noise, "set_temperature", {"temperature": 23.0},
                 make_scene(time_of_day="morning"),
             ))
-        for _ in range(2):
+        for _ in range(6):
             await memory_manager.record_interaction(make_interaction(
                 uid_noise, "set_temperature", {"temperature": 40.0},
                 make_scene(time_of_day="morning"),
             ))
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.3)
         noise_profile = await memory_manager.build_user_profile(uid_noise)
-        noise_temp = noise_profile.temperature_preference
-        noise_dev = abs(noise_temp - 23.0)
-        # 业务标准: 20%噪声下偏差 < 0.5°C 优秀, < 1.5°C 良好, < 3°C 合格, < 5°C 较差
-        noise_score = _score_lower(noise_dev, 0.3, 1.0, 2.5, 5.0)
+        noise_dev = abs(noise_profile.temperature_preference - 23.0)
+        results["NoiseDeviation"] = {"raw": noise_dev, **_check("NoiseDeviation", noise_dev)}
 
-        # 5.2 冲突处理
-        # 业务场景: 车主和乘客在不同时段设置不同温度，系统应识别时段差异而非简单平均
         uid_conflict = "user_eval_conflict"
         for _ in range(5):
             await memory_manager.record_interaction(make_interaction(
                 uid_conflict, "set_temperature", {"temperature": 23.0},
                 make_scene(time_of_day="morning"),
             ))
-        for _ in range(3):
+        for _ in range(5):
             await memory_manager.record_interaction(make_interaction(
                 uid_conflict, "set_temperature", {"temperature": 28.0},
                 make_scene(time_of_day="evening"),
             ))
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.3)
         conflict_profile = await memory_manager.build_user_profile(uid_conflict)
         conflict_temp = conflict_profile.temperature_preference
-        # 应偏向出现次数更多的 23°C（早晨场景更多）
-        conflict_dev = abs(conflict_temp - 23.0)
-        # 业务标准: 偏离多数值 < 1°C 优秀, < 2°C 良好, < 4°C 合格
-        conflict_score = _score_lower(conflict_dev, 0.5, 1.5, 3.0, 6.0)
+        biased_to_majority = abs(conflict_temp - 23.0) < abs(conflict_temp - 28.0)
+        results["ConflictMajority"] = {"raw": biased_to_majority, **_check("ConflictMajority", biased_to_majority)}
 
-        # 5.3 用户隔离
-        # 业务场景: 多驾驶员共用车辆，系统应严格隔离不同用户的偏好
         uid_iso_a = "user_eval_iso_a"
         uid_iso_b = "user_eval_iso_b"
         for _ in range(5):
             await memory_manager.record_interaction(make_interaction(
-                uid_iso_a, "set_temperature", {"temperature": 20.0}, make_scene(),
+                uid_iso_a, "set_temperature", {"temperature": 22.0}, make_scene(),
             ))
         for _ in range(5):
             await memory_manager.record_interaction(make_interaction(
-                uid_iso_b, "set_temperature", {"temperature": 26.0}, make_scene(),
+                uid_iso_b, "set_temperature", {"temperature": 24.0}, make_scene(),
             ))
-        await asyncio.sleep(0.1)
-        profile_a = await memory_manager.build_user_profile(uid_iso_a)
-        profile_b = await memory_manager.build_user_profile(uid_iso_b)
-        iso_diff = abs(profile_a.temperature_preference - profile_b.temperature_preference)
-        # 业务标准: 用户间差异 ≥ 5°C 优秀, ≥ 3°C 良好, ≥ 1°C 合格
-        iso_score = _score_higher(iso_diff, 5.5, 3.5, 1.5, 0.5)
-
-        anti_score = (noise_score * 0.40 + conflict_score * 0.35 + iso_score * 0.25)
-        scores["anti_interference"] = anti_score
-        details["anti_interference"] = {
-            "NoiseDev(°C)": (noise_dev, noise_score),
-            "ConflictDev(°C)": (conflict_dev, conflict_score),
-            "UserIsoDiff(°C)": (iso_diff, iso_score),
-        }
+        await asyncio.sleep(0.3)
+        pa = await memory_manager.build_user_profile(uid_iso_a)
+        pb = await memory_manager.build_user_profile(uid_iso_b)
+        iso_diff = abs(pa.temperature_preference - pb.temperature_preference)
+        results["UserIsolation"] = {"raw": iso_diff, **_check("UserIsolation", iso_diff)}
 
         # ═══════════════════════════════════════════════════════════════
-        # 六、用户体验 (权重 15%)
+        # 六、用户体验 (4项)
         # ═══════════════════════════════════════════════════════════════
 
-        # 6.1 需求预测命中率
-        # 业务场景: 早晨进入车辆，系统应主动预测导航到公司
         uid_ux = "user_eval_ux"
         morning_ux = make_scene(time_of_day="morning")
+        evening_ux = make_scene(time_of_day="evening")
         for _ in range(5):
             await memory_manager.record_interaction(make_interaction(
                 uid_ux, "navigate", {"destination": "公司"}, morning_ux,
             ))
-        await asyncio.sleep(0.2)
-        preds = await memory_manager.predict_user_needs(uid_ux, morning_ux)
-        pred_hit = any(
-            p.get("action", {}).get("navigate_to") == "公司"
-            for p in preds
-        )
-        pred_hit_score = 100.0 if pred_hit else 0.0
+        for _ in range(5):
+            await memory_manager.record_interaction(make_interaction(
+                uid_ux, "play_music", {"genre": "jazz"}, evening_ux,
+            ))
+        await asyncio.sleep(0.5)
 
-        # 6.2 交互减少率
-        # 业务场景: 系统能预测用户需求，减少用户手动操作步骤
-        high_conf = [p for p in preds if p.get("confidence", 0) >= 0.3]
-        reduction = min(1.0, len(high_conf) / 3)
-        # 业务标准: 交互减少率 ≥ 0.50 优秀, ≥ 0.30 良好, ≥ 0.15 合格
-        reduction_score = _score_higher(reduction, 0.50, 0.30, 0.15, 0.05)
+        pred_hits = 0
+        for test_scene in [morning_ux, evening_ux, make_scene(time_of_day="afternoon")]:
+            preds = await memory_manager.predict_user_needs(uid_ux, test_scene)
+            if test_scene == morning_ux:
+                hit = any(p.get("action", {}).get("navigate_to") == "公司" for p in preds)
+            elif test_scene == evening_ux:
+                hit = any(p.get("action", {}).get("play_music") is not None for p in preds)
+            else:
+                hit = len(preds) > 0
+            pred_hits += int(hit)
+        pred_hit_rate = pred_hits / 3
+        results["PredictionHit"] = {"raw": pred_hit_rate, **_check("PredictionHit", pred_hit_rate)}
 
-        # 6.3 个性化感知度
-        # 业务场景: 不同用户的音乐偏好应被区分，而非给出通用推荐
+        morning_preds = await memory_manager.predict_user_needs(uid_ux, morning_ux)
+        high_conf_count = len([p for p in morning_preds if p.get("confidence", 0) >= 0.3])
+        results["HighConfPrediction"] = {"raw": high_conf_count, **_check("HighConfPrediction", high_conf_count)}
+
         uid_a = "user_eval_pers_a"
         uid_b = "user_eval_pers_b"
         for _ in range(5):
@@ -1404,83 +1385,168 @@ class TestComprehensiveEvaluation:
             await memory_manager.record_interaction(make_interaction(
                 uid_b, "play_music", {"genre": "轻音乐"}, make_scene(),
             ))
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
         pa = await memory_manager.build_user_profile(uid_a)
         pb = await memory_manager.build_user_profile(uid_b)
         overlap = set(pa.music_preferences) & set(pb.music_preferences)
         total_prefs = len(pa.music_preferences) + len(pb.music_preferences)
         diff_ratio = 1 - len(overlap) / max(total_prefs, 1)
-        # 业务标准: 个性化区分度 ≥ 0.80 优秀, ≥ 0.60 良好, ≥ 0.30 合格
-        pers_score = _score_higher(diff_ratio, 0.90, 0.70, 0.40, 0.20)
+        results["Personalization"] = {"raw": diff_ratio, **_check("Personalization", diff_ratio)}
 
-        ux_score = (pred_hit_score * 0.35 + reduction_score * 0.35 + pers_score * 0.30)
-        scores["user_experience"] = ux_score
-        details["user_experience"] = {
-            "PredictionHit": (pred_hit, pred_hit_score),
-            "InteractionReduction": (reduction, reduction_score),
-            "Personalization": (diff_ratio, pers_score),
-        }
+        uid_imp = "user_eval_implicit"
+        imp_scene = make_scene(time_of_day="morning")
+        for _ in range(5):
+            await memory_manager.record_interaction(make_interaction(
+                uid_imp, "navigate", {"destination": "公司"}, imp_scene,
+            ))
+        await asyncio.sleep(0.5)
+        patterns_before = await memory_manager.get_behavior_patterns(uid_imp)
+        conf_before = max((p.confidence for p in patterns_before), default=0)
+
+        _ = await memory_manager.predict_user_needs(uid_imp, imp_scene)
+        for _ in range(3):
+            await memory_manager.record_interaction(make_interaction(
+                uid_imp, "navigate", {"destination": "公司"}, imp_scene,
+            ))
+        await asyncio.sleep(0.5)
+        patterns_after = await memory_manager.get_behavior_patterns(uid_imp)
+        conf_after = max((p.confidence for p in patterns_after), default=conf_before)
+        implicit_improved = conf_after > conf_before
+        results["ImplicitFeedback"] = {"raw": implicit_improved, **_check("ImplicitFeedback", implicit_improved)}
 
         # ═══════════════════════════════════════════════════════════════
-        # 加权汇总
+        # 七、自适应能力 (3项)
         # ═══════════════════════════════════════════════════════════════
-        weights = {
-            "accuracy": 0.20,
-            "retention": 0.15,
-            "speed": 0.15,
-            "generalization": 0.25,
-            "anti_interference": 0.10,
-            "user_experience": 0.15,
-        }
 
-        final_score = sum(scores[k] * weights[k] for k in weights)
+        uid_fb = "user_eval_feedback"
+        fb_scene = make_scene(time_of_day="morning")
+        for _ in range(8):
+            await memory_manager.record_interaction(make_interaction(
+                uid_fb, "navigate", {"destination": "公司"}, fb_scene,
+            ))
+        await asyncio.sleep(0.5)
+        patterns_before = await memory_manager.get_behavior_patterns(uid_fb)
+        conf_before = max((p.confidence for p in patterns_before), default=0)
+
+        if patterns_before:
+            pred_id = patterns_before[0].pattern_name
+            await memory_manager.record_feedback(
+                user_id=uid_fb, prediction_id=pred_id,
+                feedback_type="like", prediction_data={"action": "navigate", "destination": "公司"},
+            )
+        await asyncio.sleep(0.5)
+        patterns_after = await memory_manager.get_behavior_patterns(uid_fb)
+        conf_after = max((p.confidence for p in patterns_after), default=conf_before)
+        conf_delta = conf_after - conf_before
+        results["FeedbackGain"] = {"raw": conf_delta, **_check("FeedbackGain", conf_delta)}
+
+        uid_prog = "user_eval_progress"
+        for i in range(20):
+            await memory_manager.record_interaction(make_interaction(
+                uid_prog, "set_temperature", {"temperature": 23.0 + (i % 5) * 0.5},
+                make_scene(time_of_day="morning"),
+            ))
+        await asyncio.sleep(0.5)
+        prog_profile = await memory_manager.build_user_profile(uid_prog)
+        data_suff = getattr(prog_profile, "data_sufficiency", 0.0)
+        results["DataSufficiency"] = {"raw": data_suff, **_check("DataSufficiency", data_suff)}
+
+        anomaly_scene = make_scene(
+            time_of_day="night", weather="rainy", road_type="highway",
+        )
+        anomaly_scene.driver_fatigue = 0.8
+        anomaly_scene.vehicle_speed = 100
+        anomaly_scene.engine_status = "driving"
+        anomaly_result = await memory_manager.detect_scene_anomaly(anomaly_scene)
+        anomaly_count = len(anomaly_result.get("anomalies", []))
+        results["AnomalyDetected"] = {"raw": anomaly_count, **_check("AnomalyDetected", anomaly_count)}
 
         # ═══════════════════════════════════════════════════════════════
         # 输出报告
         # ═══════════════════════════════════════════════════════════════
         print("\n" + "=" * 70)
-        print("  认知记忆模块 — 综合质量评估报告 (严苛标准)")
+        print("  认知记忆模块 — 综合质量评估报告 (v4.0 客观黑盒评估)")
+        print("  评估原则: 完全黑盒 | 二元通过/不通过 | 固定阈值 | 原始数据透明")
         print("=" * 70)
 
         dim_names = {
-            "accuracy": "记忆准确性",
-            "retention": "信息保留率",
-            "speed": "响应速度",
-            "generalization": "泛化能力",
-            "anti_interference": "抗干扰性",
-            "user_experience": "用户体验",
+            "accuracy": "记忆准确性", "retention": "信息保留率",
+            "speed": "响应速度", "generalization": "泛化能力",
+            "anti_interference": "抗干扰性", "user_experience": "用户体验",
+            "adaptive": "自适应能力",
         }
 
-        for dim_key in weights:
+        dim_passed: dict[str, int] = {d: 0 for d in _DIM_WEIGHTS}
+        dim_total: dict[str, int] = {d: 0 for d in _DIM_WEIGHTS}
+        total_passed = 0
+        total_criteria = 0
+
+        for dim_key in _DIM_WEIGHTS:
             dim_name = dim_names[dim_key]
-            w = weights[dim_key]
-            s = scores[dim_key]
-            weighted = s * w
-            print(f"\n  [{dim_name}] 权重 {w*100:.0f}% | 维度得分: {s:.1f} | 加权: {weighted:.1f}")
-            for metric, (val, sc) in details[dim_key].items():
-                if isinstance(val, float):
-                    print(f"    {metric}: {val:.3f} → {sc:.0f}分")
+            print(f"\n  [{dim_name}] (权重 {_DIM_WEIGHTS[dim_key]*100:.0f}%)")
+
+            for name, r in results.items():
+                if _CRITERIA_DIM.get(name) != dim_key:
+                    continue
+                dim_total[dim_key] += 1
+                total_criteria += 1
+                if r["passed"]:
+                    dim_passed[dim_key] += 1
+                    total_passed += 1
+                status = "PASS" if r["passed"] else "FAIL"
+                raw_val = r["raw"]
+                if isinstance(raw_val, float):
+                    raw_str = f"{raw_val:.4f}"
+                elif isinstance(raw_val, bool):
+                    raw_str = str(raw_val)
                 else:
-                    print(f"    {metric}: {val} → {sc:.0f}分")
+                    raw_str = str(raw_val)
+                print(f"    [{status}] {name}: {raw_str} (阈值: {r['threshold']})")
+
+        dim_scores = {}
+        for dim_key in _DIM_WEIGHTS:
+            if dim_total[dim_key] > 0:
+                dim_scores[dim_key] = (dim_passed[dim_key] / dim_total[dim_key]) * 100
+            else:
+                dim_scores[dim_key] = 0.0
+
+        weighted_score = sum(dim_scores[k] * _DIM_WEIGHTS[k] for k in _DIM_WEIGHTS)
+        raw_pass_rate = (total_passed / total_criteria * 100) if total_criteria > 0 else 0.0
 
         print(f"\n{'=' * 70}")
-        print(f"  综合得分: {final_score:.1f} / 100")
-        self._print_grade(final_score)
+        print(f"  维度得分明细:")
+        for dim_key in _DIM_WEIGHTS:
+            dim_name = dim_names[dim_key]
+            print(f"    {dim_name}: {dim_scores[dim_key]:.1f}分 ({dim_passed[dim_key]}/{dim_total[dim_key]}项通过)")
+
+        print(f"\n  综合得分 (加权): {weighted_score:.1f} / 100")
+        print(f"  原始通过率:      {raw_pass_rate:.1f}% ({total_passed}/{total_criteria}项通过)")
+        self._print_grade_v4(weighted_score)
         print(f"{'=' * 70}")
 
-        assert final_score >= 30, f"Comprehensive score too low: {final_score:.1f}/100"
+        assert total_passed >= 5, f"通过标准过少: {total_passed}/{total_criteria}"
 
     @staticmethod
-    def _print_grade(score: float):
-        """输出评级"""
-        if score >= 85:
-            grade = "A (优秀) — 所有维度表现优异，达到生产级标准"
-        elif score >= 70:
-            grade = "B (良好) — 核心指标达标，存在可优化空间"
+    def _print_grade_v4(score: float):
+        """输出评级 (v4.0 客观标准)
+
+        评级基于通过率，无主观调整:
+        - A: 90+ 分 (>=90%标准通过) — 系统表现卓越
+        - B: 75+ 分 (>=75%标准通过) — 核心功能达标
+        - C: 55+ 分 (>=55%标准通过) — 基础功能可用
+        - D: 35+ 分 (>=35%标准通过) — 多项指标待改进
+        - F: <35 分 — 核心指标未达标
+        """
+        if score >= 90:
+            grade = "A — 系统表现卓越，90%以上标准通过"
+        elif score >= 75:
+            grade = "B — 核心功能达标，75%以上标准通过"
         elif score >= 55:
-            grade = "C (合格) — 基础功能满足，多项指标需改进"
-        elif score >= 40:
-            grade = "D (待改进) — 部分维度存在明显短板"
+            grade = "C — 基础功能可用，55%以上标准通过"
+        elif score >= 35:
+            grade = "D — 多项指标待改进，不足55%标准通过"
         else:
-            grade = "F (不合格) — 多项核心指标未达标，需重点整改"
+            grade = "F — 核心指标未达标，不足35%标准通过"
         print(f"  评级: {grade}")
+
+

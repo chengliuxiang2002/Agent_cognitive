@@ -281,6 +281,39 @@ class MemoryManager:
         """检测场景变化"""
         return self._context_engine.detect_scene_change(previous, current)
 
+    async def detect_compound_scene(self, scene: SceneContext) -> list[str]:
+        """检测复合场景 — 识别多因素组合的特殊场景
+
+        复合场景比单一因素场景更具语义含义:
+        - "rush_hour": 早高峰/晚高峰 + 拥堵
+        - "night_highway": 夜间 + 高速
+        - "storm_drive": 暴雨 + 驾驶中
+        - "school_run": 早晨 + 学校 + 工作日
+        - "weekend_trip": 周末 + 导航中 + 休闲目的
+        - "fatigue_alert": 高疲劳度 + 夜间驾驶
+        - "family_drive": 有乘客 + 低速城市道路
+        """
+        return self._context_engine.detect_compound_scene(scene)
+
+    async def detect_scene_anomaly(
+        self, scene: SceneContext, typical_scenes: Optional[list[SceneContext]] = None
+    ) -> dict[str, Any]:
+        """检测异常场景 — 检测偏离常规模式的场景
+
+        检测维度: 时间异常、路线异常、行为异常
+        返回: is_anomaly, anomaly_type, severity, reason
+        """
+        return self._context_engine.detect_scene_anomaly(scene, typical_scenes)
+
+    async def predict_scene_sequence(
+        self, scene: SceneContext, max_steps: int = 3
+    ) -> list[dict[str, Any]]:
+        """预测场景序列 — 基于当前场景预测后续场景变化
+
+        返回: 场景序列预测列表，每项包含 next_scene, confidence, reason
+        """
+        return self._context_engine.predict_scene_sequence(scene, max_steps)
+
     async def get_behavior_patterns(
         self, user_id: str, pattern_type: Optional[str] = None
     ) -> list[BehaviorPattern]:
