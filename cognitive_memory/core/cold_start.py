@@ -335,3 +335,40 @@ class ColdStartEngine:
         # 回退到默认模板
         template = self.get_default_template(department)
         return template.get(attribute)
+
+    def get_personalization_progress(
+        self, profile: UserProfile, group_profiles: list[UserProfile]
+    ) -> dict[str, Any]:
+        """P2: 渐进式个性化追踪 — 衡量从协同到个人的过渡进度
+
+        返回:
+        - stage: "cold_start" | "hybrid" | "personalized"
+        - personal_weight: 个人数据权重 (0~1)
+        - group_weight: 群体数据权重 (0~1)
+        - data_sufficiency: 数据充足度 (0~1)
+        """
+        data_points = profile.data_points_count
+        confidence = profile.confidence_score
+
+        # 阶段判定
+        if data_points < 10 or confidence < 0.3:
+            stage = "cold_start"
+            personal_weight = max(0.1, min(0.4, data_points / 10.0))
+        elif data_points < 30 or confidence < 0.6:
+            stage = "hybrid"
+            personal_weight = 0.4 + 0.3 * min(1.0, (data_points - 10) / 20.0)
+        else:
+            stage = "personalized"
+            personal_weight = 0.7 + 0.3 * min(1.0, (data_points - 30) / 50.0)
+
+        group_weight = 1.0 - personal_weight
+        data_sufficiency = min(1.0, data_points / 50.0)
+
+        return {
+            "stage": stage,
+            "personal_weight": round(personal_weight, 3),
+            "group_weight": round(group_weight, 3),
+            "data_sufficiency": round(data_sufficiency, 3),
+            "data_points": data_points,
+            "confidence": round(confidence, 3),
+        }

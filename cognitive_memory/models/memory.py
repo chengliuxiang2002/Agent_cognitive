@@ -238,6 +238,17 @@ class SceneContext:
     music_playing: bool = False
     current_media: str = ""
 
+    # P2: 感知粒度扩展 — 增加舱内精细化感知信号
+    seat_position: str = ""             # 座椅位置: "forward", "mid", "back"
+    seat_recline: float = 0.0           # 座椅靠背角度 (度)
+    mirror_left: str = ""               # 左后视镜角度
+    mirror_right: str = ""              # 右后视镜角度
+    media_volume: int = 0               # 媒体音量 (0-100)
+    driver_fatigue: float = 0.0         # 驾驶员疲劳度 (0-1, 0=清醒, 1=极度疲劳)
+    passenger_type: str = ""            # 乘客类型: "adult", "child", "elderly", "pet"
+    cabin_light_level: str = ""         # 舱内灯光: "bright", "dim", "dark"
+    driver_emotion: str = ""            # 驾驶员情绪: "neutral", "happy", "angry", "tired", "stressed"
+
     # 行程信息
     is_navigating: bool = False
     destination: str = ""
@@ -267,6 +278,15 @@ class SceneContext:
             "passengers_count": self.passengers_count,
             "music_playing": self.music_playing,
             "current_media": self.current_media,
+            "seat_position": self.seat_position,
+            "seat_recline": self.seat_recline,
+            "mirror_left": self.mirror_left,
+            "mirror_right": self.mirror_right,
+            "media_volume": self.media_volume,
+            "driver_fatigue": self.driver_fatigue,
+            "passenger_type": self.passenger_type,
+            "cabin_light_level": self.cabin_light_level,
+            "driver_emotion": self.driver_emotion,
             "is_navigating": self.is_navigating,
             "destination": self.destination,
             "estimated_arrival": self.estimated_arrival.isoformat() if self.estimated_arrival else None,
@@ -284,6 +304,32 @@ class SceneContext:
             self.road_type or "unknown",
         ]
         return "|".join(parts)
+
+    @property
+    def is_weekend(self) -> bool:
+        """P1: 当前是否为周末 (基于 timestamp)"""
+        return self.timestamp.weekday() >= 5  # 5=Saturday, 6=Sunday
+
+    @property
+    def season(self) -> str:
+        """P1: 当前季节 (基于 timestamp 月份)
+
+        返回: "spring", "summer", "autumn", "winter"
+        """
+        month = self.timestamp.month
+        if month in (3, 4, 5):
+            return "spring"
+        elif month in (6, 7, 8):
+            return "summer"
+        elif month in (9, 10, 11):
+            return "autumn"
+        else:
+            return "winter"
+
+    @property
+    def day_of_week(self) -> str:
+        """P1: 当前星期几"""
+        return self.timestamp.strftime("%A")
 
 
 @dataclass

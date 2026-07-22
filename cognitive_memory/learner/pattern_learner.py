@@ -42,9 +42,15 @@ class PatternLearner:
     def learn_temperature_preference(
         self, interactions: list[InteractionRecord], profile: UserProfile
     ) -> list[BehaviorPattern]:
-        """学习温度偏好模式"""
+        """学习温度偏好模式 (P1: 增加季节感知)
+
+        夏季和冬季的温度偏好差异显著:
+        - 夏季: 22-24°C (制冷)
+        - 冬季: 24-27°C (制热)
+        按 season 分组避免季节混淆导致的偏好偏差
+        """
         patterns: list[BehaviorPattern] = []
-        temp_settings: list[tuple[float, str]] = []  # (temperature, context_key)
+        temp_settings: list[tuple[float, str, str]] = []  # (temp, context_key, season)
 
         for record in interactions:
             if "temperature" in record.processed_input:
@@ -52,29 +58,35 @@ class PatternLearner:
                 temp = record.processed_input.get("temperature")
                 if temp is not None and ctx:
                     context_key = ctx.get_context_key()
-                    temp_settings.append((float(temp), context_key))
+                    season = ctx.season
+                    temp_settings.append((float(temp), context_key, season))
 
         if not temp_settings:
             return patterns
 
-        # 按上下文分组统计
-        context_groups: dict[str, list[float]] = defaultdict(list)
-        for temp, ctx_key in temp_settings:
-            context_groups[ctx_key].append(temp)
+        # P1: 按上下文+季节分组统计
+        seasonal_groups: dict[str, list[float]] = defaultdict(list)
+        for temp, ctx_key, season in temp_settings:
+            key = f"{ctx_key}|{season}"
+            seasonal_groups[key].append(temp)
 
-        for ctx_key, temps in context_groups.items():
+        for key, temps in seasonal_groups.items():
             if len(temps) >= self._min_occurrences:
                 avg_temp = sum(temps) / len(temps)
                 variance = sum((t - avg_temp) ** 2 for t in temps) / len(temps)
                 confidence = 1.0 / (1.0 + variance)
 
                 if confidence >= self._confidence_threshold:
+                    ctx_key, season = key.rsplit("|", 1)
                     patterns.append(BehaviorPattern(
                         id=str(uuid.uuid4()),
                         user_id=profile.user_id,
-                        pattern_name=f"temperature_pref_{ctx_key}",
+                        pattern_name=f"temperature_pref_{ctx_key}_{season}",
                         pattern_type="temperature",
-                        trigger_conditions={"context_key": ctx_key},
+                        trigger_conditions={
+                            "context_key": ctx_key,
+                            "season": season,
+                        },
                         expected_action={"set_temperature": round(avg_temp, 1)},
                         occurrence_count=len(temps),
                         success_rate=confidence,
@@ -89,7 +101,13 @@ class PatternLearner:
     def learn_route_preference(
         self, interactions: list[InteractionRecord], profile: UserProfile
     ) -> list[BehaviorPattern]:
-        """学习路线偏好模式"""
+        """学习路线偏好模式 (P1: 增加时序感知)
+
+        支持三级分组:
+        - 基础: destination + time_of_day
+        - 时序: + is_weekend (区分工作日/周末)
+        - 季节: + season (区分夏天空调/冬天空调)
+        """
         patterns: list[BehaviorPattern] = []
         destinations: list[dict[str, Any]] = []
 
@@ -97,32 +115,44 @@ class PatternLearner:
             if record.intent == "navigate" and record.scene_context:
                 dest = record.processed_input.get("destination", "")
                 if dest:
+                    scene = record.scene_context
                     destinations.append({
                         "destination": dest,
-                        "time_of_day": record.scene_context.time_of_day,
+                        "time_of_day": scene.time_of_day,
                         "day_of_week": record.timestamp.strftime("%A"),
-                        "trip_purpose": record.scene_context.trip_purpose,
+                        "is_weekend": scene.is_weekend,
+                        "season": scene.season,
+                        "trip_purpose": scene.trip_purpose,
                     })
 
-        # 按目的地+时段分组
+        # P1: 按目的地+时段+周末/工作日分组
         time_slot_groups: dict[str, list[dict]] = defaultdict(list)
         for d in destinations:
-            key = f"{d['destination']}|{d['time_of_day']}"
+            key = f"{d['destination']}|{d['time_of_day']}|{d['is_weekend']}"
             time_slot_groups[key].append(d)
 
         for key, entries in time_slot_groups.items():
             if len(entries) >= self._min_occurrences:
-                dest, time_slot = key.split("|")
+                parts = key.split("|")
+                dest, time_slot, is_weekend_str = parts[0], parts[1], parts[2]
+                is_weekend = is_weekend_str == "True"
+                season = entries[0].get("season", "")
                 confidence = min(1.0, len(entries) / (self._min_occurrences * 2))
 
+                pattern_name = (
+                    f"route_pref_{dest}_{time_slot}_"
+                    f"{'weekend' if is_weekend else 'weekday'}"
+                )
                 patterns.append(BehaviorPattern(
                     id=str(uuid.uuid4()),
                     user_id=profile.user_id,
-                    pattern_name=f"route_pref_{dest}_{time_slot}",
+                    pattern_name=pattern_name,
                     pattern_type="route",
                     trigger_conditions={
                         "time_of_day": time_slot,
                         "day_of_week": entries[0].get("day_of_week"),
+                        "is_weekend": is_weekend,
+                        "season": season,
                     },
                     expected_action={
                         "navigate_to": dest,

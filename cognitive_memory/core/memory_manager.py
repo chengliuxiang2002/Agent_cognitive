@@ -130,6 +130,10 @@ class MemoryManager:
         # SC-7: 数据备份存储 (内存备份，生产环境可替换为文件/S3)
         self._data_backup: dict[str, dict[str, Any]] = {}
 
+        # P0: 反馈闭环 — 缓存最近预测用于隐式反馈检测
+        self._last_predictions: dict[str, list[dict[str, Any]]] = {}
+        self._prediction_scene: dict[str, SceneContext] = {}
+
     # ─── 公共接口 ─────────────────────────────────────────
 
     async def record_interaction(
@@ -166,7 +170,10 @@ class MemoryManager:
             await self._short_term.store(scene_memory)
             await self._long_term.store(scene_memory)
 
-        # 6. 异步触发学习流程
+        # 6. P0: 隐式反馈检测 — 比对实际行为与预测，自动调整置信度
+        asyncio.create_task(self._detect_implicit_feedback(interaction))
+
+        # 7. 异步触发学习流程
         asyncio.create_task(self._learn_from_interaction(interaction))
 
         return memory_item.id
@@ -258,11 +265,15 @@ class MemoryManager:
         user_id: str,
         current_scene: SceneContext,
     ) -> list[dict[str, Any]]:
-        """预测用户需求"""
+        """预测用户需求, 同时缓存预测结果用于隐式反馈检测"""
         profile = await self._profile_store.get_profile(user_id)
-        return await self._context_engine.predict_user_needs(
+        predictions = await self._context_engine.predict_user_needs(
             user_id, current_scene, profile
         )
+        # P0: 缓存预测结果，供后续隐式反馈检测使用
+        self._last_predictions[user_id] = predictions
+        self._prediction_scene[user_id] = current_scene
+        return predictions
 
     async def detect_scene_change(
         self, previous: SceneContext, current: SceneContext
@@ -684,6 +695,158 @@ class MemoryManager:
                     await self._pattern_store.save_pattern(pattern)
                     logger.debug(
                         f"Adjusted pattern {pattern.pattern_name} confidence: "
+                        f"{old_confidence:.2f} → {pattern.confidence:.2f}"
+                    )
+                    break
+        except Exception as e:
+            logger.error(f"Confidence adjustment error: {e}")
+
+    # ─── P0: 隐式反馈检测 ──────────────────────────────────
+
+    async def _detect_implicit_feedback(self, interaction: InteractionRecord):
+        """检测隐式反馈: 比对用户实际行为与最近预测
+
+        隐式反馈不需要用户主动点击"有用/无用"，而是通过观察用户
+        后续行为自动判断预测是否准确:
+        - 用户执行了预测的动作 → 正向反馈 (like)
+        - 用户做了完全不同的动作 → 负向反馈 (dislike)
+        - 没有相关预测 → 跳过
+
+        效果: 预测置信度自适应调整，越准越自信，越不准越保守
+        """
+        try:
+            uid = interaction.user_id
+            if uid not in self._last_predictions:
+                return
+
+            predictions = self._last_predictions.pop(uid)
+            pred_scene = self._prediction_scene.pop(uid, None)
+
+            if not predictions:
+                return
+
+            # 提取用户实际行为
+            actual_intent = interaction.intent
+            actual_input = interaction.processed_input
+
+            # 遍历预测，检查是否命中
+            matched = False
+            for pred in predictions:
+                pred_action = pred.get("action", {})
+                pred_confidence = pred.get("confidence", 0)
+
+                # 匹配规则: 预测的 action 与实际输入有交集
+                is_match = self._action_matches(pred_action, actual_input, actual_intent)
+
+                if is_match and pred_confidence >= 0.3:
+                    matched = True
+                    # 隐式正向反馈
+                    if pred.get("pattern_name"):
+                        await self._adjust_pattern_confidence(
+                            uid, pred["pattern_name"], "like", implicit=True
+                        )
+                    logger.debug(
+                        f"Implicit like: user {uid} action matched prediction "
+                        f"'{pred.get('pattern_name', 'unknown')}'"
+                    )
+                    break
+
+            if not matched and pred_scene:
+                # 场景匹配但预测未命中 → 轻度负反馈
+                for pred in predictions:
+                    if pred.get("pattern_name") and pred.get("confidence", 0) >= 0.5:
+                        await self._adjust_pattern_confidence(
+                            uid, pred["pattern_name"], "dislike", implicit=True
+                        )
+
+        except Exception as e:
+            logger.error(f"Implicit feedback error: {e}")
+
+    @staticmethod
+    def _action_matches(
+        pred_action: dict, actual_input: dict, actual_intent: str
+    ) -> bool:
+        """判断预测的 action 是否与实际行为匹配
+
+        支持多种匹配模式:
+        - 精确键值匹配: 预测 set_temperature=24, 实际 set_temperature=24
+        - 语义匹配: 预测 navigate_to=X, 实际 destination=X (同义不同键名)
+        - 意图匹配: 预测 intent=music_play, 实际 intent=play_music (模糊匹配)
+        """
+        if not pred_action or not actual_input:
+            return False
+
+        # 精确匹配: 相同键且值相同或相近
+        for key, pred_val in pred_action.items():
+            if key in actual_input:
+                actual_val = actual_input[key]
+                if isinstance(pred_val, (int, float)) and isinstance(actual_val, (int, float)):
+                    if abs(pred_val - actual_val) <= 0.5:
+                        return True
+                elif pred_val == actual_val:
+                    return True
+
+        # 语义匹配: 同义键名
+        semantic_aliases = {
+            "navigate_to": ["destination", "navigate_to", "nav_dest"],
+            "set_temperature": ["temperature", "set_temp", "ac_temp"],
+            "play_music": ["music", "play", "media"],
+            "set_driving_mode": ["driving_mode", "mode"],
+        }
+        for key, pred_val in pred_action.items():
+            aliases = semantic_aliases.get(key, [key])
+            for alias in aliases:
+                if alias in actual_input:
+                    actual_val = actual_input[alias]
+                    if isinstance(pred_val, (int, float)) and isinstance(actual_val, (int, float)):
+                        if abs(pred_val - actual_val) <= 0.5:
+                            return True
+                    elif pred_val == actual_val:
+                        return True
+
+        # 意图前缀匹配
+        if actual_intent:
+            pred_intent = pred_action.get("intent", "")
+            if pred_intent and (
+                pred_intent in actual_intent or actual_intent in pred_intent
+            ):
+                return True
+
+        return False
+
+    async def _adjust_pattern_confidence(
+        self, user_id: str, pattern_name: str,
+        feedback_type: str, implicit: bool = False,
+    ):
+        """调整模式置信度 (支持显式+隐式反馈)
+
+        隐式反馈的调整幅度小于显式反馈:
+        - 显式 like: 置信度 +0.05
+        - 隐式 like: 置信度 +0.02
+        - 显式 dislike: 置信度 -0.08
+        - 隐式 dislike: 置信度 -0.03
+        """
+        try:
+            patterns = await self._pattern_store.get_patterns(user_id)
+            for pattern in patterns:
+                if pattern.pattern_name == pattern_name:
+                    old_confidence = pattern.confidence
+                    if feedback_type == "like":
+                        delta = 0.02 if implicit else 0.05
+                        pattern.confidence = min(1.0, pattern.confidence + delta)
+                        pattern.success_rate = min(1.0, pattern.success_rate + delta * 0.6)
+                    elif feedback_type == "dislike":
+                        delta = 0.03 if implicit else 0.08
+                        pattern.confidence = max(0.1, pattern.confidence - delta)
+                        pattern.success_rate = max(0.0, pattern.success_rate - delta * 0.6)
+
+                    # 标记为已观察
+                    pattern.last_observed = datetime.now()
+
+                    await self._pattern_store.save_pattern(pattern)
+                    logger.debug(
+                        f"Adjusted pattern {pattern_name} confidence "
+                        f"({'implicit' if implicit else 'explicit'} {feedback_type}): "
                         f"{old_confidence:.2f} → {pattern.confidence:.2f}"
                     )
                     break

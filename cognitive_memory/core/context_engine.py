@@ -208,10 +208,12 @@ class ContextEngine:
         current_scene: SceneContext,
         profile: Optional[UserProfile] = None,
     ) -> list[dict[str, Any]]:
-        """基于当前场景预测用户需求
+        """基于当前场景预测用户需求 (P1: 预测增强)
 
-        返回预测的需求列表，按置信度排序。
-        每个预测结果包含 reason 字段，说明推荐依据。
+        增强特性:
+        - 置信度阈值过滤: 只返回置信度 ≥ 0.3 的预测
+        - 多步联动预测: 识别导航→温度/音乐等关联模式
+        - 推送时机策略: 根据驾驶状态决定推送时机 (DEBOUNCED/NORMAL/URGENT)
         """
         predictions: list[dict[str, Any]] = []
 
@@ -270,9 +272,103 @@ class ContextEngine:
             cal_predictions = self._predict_from_calendar(current_scene.calendar_event)
             predictions.extend(cal_predictions)
 
+        # 5. P1: 多步联动预测 — 基于已有预测推断关联需求
+        linked_predictions = self._predict_linked_actions(predictions, current_scene)
+        predictions.extend(linked_predictions)
+
         # 按置信度排序
         predictions.sort(key=lambda x: x["confidence"], reverse=True)
+
+        # P1: 置信度阈值过滤 (只保留 ≥ 0.3 的预测)
+        predictions = [p for p in predictions if p["confidence"] >= 0.3]
+
+        # P1: 推送时机标注
+        for p in predictions:
+            p["push_timing"] = self._compute_push_timing(p, current_scene)
+
         return predictions[:5]
+
+    def _predict_linked_actions(
+        self, predictions: list[dict[str, Any]], scene: SceneContext
+    ) -> list[dict[str, Any]]:
+        """P1: 多步联动预测 — 基于已有预测推断关联需求
+
+        关联规则:
+        - 导航到公司 → 早上通勤 → 播放早间新闻
+        - 导航到家 → 下班回家 → 播放轻松音乐
+        - 设置运动模式 → 播放激昂音乐
+        - 长途驾驶 → 推荐休息站
+        """
+        linked: list[dict[str, Any]] = []
+        linked_actions: set[str] = set()
+
+        for p in predictions:
+            action = p.get("action", {})
+
+            # 导航到公司 → 播放早间新闻
+            if action.get("navigate_to") == "公司" and scene.time_of_day == "morning":
+                if "play_music" not in linked_actions:
+                    linked_actions.add("play_music")
+                    linked.append({
+                        "type": "linked_prediction",
+                        "action": {"play_music": "早间新闻"},
+                        "confidence": min(1.0, p["confidence"] * 0.6),
+                        "source": "linked_pattern",
+                        "reason": "早间通勤已导航到公司，联动推荐播放早间新闻",
+                        "linked_from": p.get("pattern_name", ""),
+                    })
+
+            # 导航到家 → 播放轻松音乐
+            if action.get("navigate_to") == "家" and scene.time_of_day == "evening":
+                if "play_music" not in linked_actions:
+                    linked_actions.add("play_music")
+                    linked.append({
+                        "type": "linked_prediction",
+                        "action": {"play_music": "轻松音乐"},
+                        "confidence": min(1.0, p["confidence"] * 0.6),
+                        "source": "linked_pattern",
+                        "reason": "晚间导航回家，联动推荐播放轻松音乐",
+                        "linked_from": p.get("pattern_name", ""),
+                    })
+
+            # 设置运动模式 → 播放激昂音乐
+            if action.get("set_driving_mode") == "sport":
+                if "play_music" not in linked_actions:
+                    linked_actions.add("play_music")
+                    linked.append({
+                        "type": "linked_prediction",
+                        "action": {"play_music": "运动歌单"},
+                        "confidence": min(1.0, p["confidence"] * 0.5),
+                        "source": "linked_pattern",
+                        "reason": "已切换运动模式，联动推荐播放运动歌单",
+                        "linked_from": p.get("pattern_name", ""),
+                    })
+
+        return linked
+
+    def _compute_push_timing(
+        self, prediction: dict[str, Any], scene: SceneContext
+    ) -> str:
+        """P1: 计算推送时机策略
+
+        返回推送时机:
+        - "DEBOUNCED": 延迟推送 (高速行驶、复杂路况)
+        - "NORMAL": 正常推送 (静止、低速、简单路况)
+        - "URGENT": 立即推送 (紧急需求)
+
+        策略:
+        - vehicle_speed > 60 km/h → DEBOUNCED (安全优先)
+        - traffic_condition == "jammed" → DEBOUNCED (专注驾驶)
+        - engine_status == "idle" → NORMAL (停车等待)
+        - 其他 → NORMAL
+        """
+        if scene.vehicle_speed > 60:
+            return "DEBOUNCED"
+        if scene.traffic_condition == "jammed":
+            return "DEBOUNCED"
+        if scene.engine_status == "idle":
+            return "NORMAL"
+        return "NORMAL"
 
     def _predict_from_calendar(
         self, calendar_event: dict[str, Any]
@@ -477,6 +573,14 @@ class ContextEngine:
             elif key == "day_of_week":
                 if datetime.now().strftime("%A") != expected_value:
                     return False
+            elif key == "is_weekend":
+                # P1: 区分工作日/周末模式
+                if context.is_weekend != expected_value:
+                    return False
+            elif key == "season":
+                # P1: 区分季节模式 (温度/空调偏好因季节而异)
+                if context.season != expected_value:
+                    return False
             elif key == "weather":
                 if context.weather != expected_value:
                     return False
@@ -485,6 +589,186 @@ class ContextEngine:
                     return False
 
         return True
+
+    # ─── P3: 场景语义理解 ──────────────────────────────────────────
+
+    def detect_compound_scene(self, scene: SceneContext) -> list[str]:
+        """P3: 复合场景检测 — 识别多因素组合的特殊场景
+
+        复合场景比单一因素场景更具语义含义:
+        - "rush_hour": 早高峰/晚高峰 + 拥堵
+        - "night_highway": 夜间 + 高速
+        - "storm_drive": 暴雨 + 驾驶中
+        - "school_run": 早晨 + 学校 + 工作日
+        - "weekend_trip": 周末 + 导航中 + 休闲目的
+        - "fatigue_alert": 高疲劳度 + 夜间驾驶
+        - "family_drive": 有乘客 + 低速城市道路
+
+        返回: 命中的复合场景标签列表
+        """
+        compounds: list[str] = []
+
+        # 早/晚高峰: 工作日 + 拥堵
+        if not scene.is_weekend and scene.traffic_condition in ("heavy", "jammed"):
+            if scene.time_of_day in ("morning",):
+                compounds.append("morning_rush")
+            elif scene.time_of_day in ("evening",):
+                compounds.append("evening_rush")
+
+        # 夜间高速
+        if scene.time_of_day == "night" and scene.road_type == "highway":
+            compounds.append("night_highway")
+
+        # 暴雨驾驶
+        if scene.weather == "rainy" and scene.engine_status == "driving":
+            compounds.append("storm_drive")
+
+        # 周末出行
+        if scene.is_weekend and scene.is_navigating and scene.trip_purpose == "leisure":
+            compounds.append("weekend_trip")
+
+        # 疲劳警报: 高疲劳度 + 夜间
+        if scene.driver_fatigue > 0.6 and scene.time_of_day in ("night", "evening"):
+            compounds.append("fatigue_alert")
+
+        # 家庭出行: 有乘客 + 低速城市
+        if scene.passengers_count > 0 and scene.road_type == "urban" and scene.vehicle_speed < 40:
+            compounds.append("family_drive")
+
+        # 情绪驾驶: 负面情绪 + 驾驶中
+        if scene.driver_emotion in ("angry", "stressed") and scene.engine_status == "driving":
+            compounds.append("emotional_drive")
+
+        return compounds
+
+    def detect_scene_anomaly(
+        self, scene: SceneContext, typical_scenes: Optional[list[SceneContext]] = None
+    ) -> dict[str, Any]:
+        """P3: 异常场景检测 — 检测偏离常规模式的场景
+
+        检测维度:
+        - 时间异常: 凌晨3点出发 (非典型时段)
+        - 路线异常: 偏离常走路线
+        - 行为异常: 疲劳驾驶时仍高速行驶
+
+        返回:
+        - is_anomaly: 是否异常
+        - anomaly_type: 异常类型
+        - severity: 严重程度 (0-1)
+        - reason: 异常原因
+        """
+        anomalies: list[dict[str, Any]] = []
+
+        # 时间异常: 凌晨 0-5 点
+        hour = scene.timestamp.hour
+        if 0 <= hour < 5:
+            anomalies.append({
+                "type": "time_anomaly",
+                "severity": 0.5,
+                "reason": f"凌晨{hour}点时段出发，非典型驾驶时间",
+            })
+
+        # 疲劳驾驶 + 高速
+        if scene.driver_fatigue > 0.7 and scene.vehicle_speed > 80:
+            anomalies.append({
+                "type": "fatigue_risk",
+                "severity": 0.9,
+                "reason": f"疲劳度{scene.driver_fatigue:.0%}时仍以{scene.vehicle_speed:.0f}km/h高速行驶，存在安全隐患",
+            })
+
+        # 恶劣天气 + 高速
+        if scene.weather in ("rainy", "snowy") and scene.vehicle_speed > 100:
+            anomalies.append({
+                "type": "weather_risk",
+                "severity": 0.7,
+                "reason": f"{scene.weather}天气下以{scene.vehicle_speed:.0f}km/h行驶，建议减速",
+            })
+
+        # 情绪驾驶 + 高速
+        if scene.driver_emotion == "angry" and scene.vehicle_speed > 100:
+            anomalies.append({
+                "type": "emotional_risk",
+                "severity": 0.8,
+                "reason": "情绪激动时高速行驶，存在路怒风险",
+            })
+
+        if not anomalies:
+            return {"is_anomaly": False, "anomalies": []}
+
+        max_severity = max(a["severity"] for a in anomalies)
+        return {
+            "is_anomaly": True,
+            "anomalies": anomalies,
+            "max_severity": max_severity,
+            "is_critical": max_severity >= 0.7,
+        }
+
+    def predict_scene_sequence(
+        self, current_scene: SceneContext, profile: Optional[UserProfile] = None
+    ) -> list[dict[str, Any]]:
+        """P3: 场景序列预测 — 预测下一个可能的场景
+
+        基于当前场景推断用户下一步可能进入的场景:
+        - 早上家 → 通勤 → 公司
+        - 公司 → 下班 → 家
+        - 周末 → 休闲 → 商场/公园
+
+        返回: 可能的后续场景列表，按概率排序
+        """
+        sequences: list[dict[str, Any]] = []
+
+        # 早上在家 → 可能去公司
+        if current_scene.time_of_day == "morning" and current_scene.location_type == "home":
+            if not current_scene.is_weekend:
+                sequences.append({
+                    "next_scene": "commute_to_work",
+                    "expected_destination": "公司",
+                    "expected_purpose": "commute",
+                    "probability": 0.85,
+                    "reason": "工作日早晨从家出发，大概率是通勤去公司",
+                })
+
+        # 下午/傍晚在公司 → 可能回家
+        if current_scene.time_of_day in ("afternoon", "evening") and current_scene.location_type == "work":
+            sequences.append({
+                "next_scene": "commute_to_home",
+                "expected_destination": "家",
+                "expected_purpose": "commute",
+                "probability": 0.80,
+                "reason": "工作日傍晚从公司出发，大概率是下班回家",
+            })
+
+        # 周末在家 → 可能去休闲
+        if current_scene.is_weekend and current_scene.location_type == "home" and current_scene.time_of_day in ("morning", "afternoon"):
+            sequences.append({
+                "next_scene": "leisure_trip",
+                "expected_destination": "商场/公园",
+                "expected_purpose": "leisure",
+                "probability": 0.60,
+                "reason": "周末白天从家出发，可能是休闲出行",
+            })
+
+        # 导航中 → 到达后场景
+        if current_scene.is_navigating and current_scene.destination:
+            if current_scene.destination == "公司":
+                sequences.append({
+                    "next_scene": "arrive_at_work",
+                    "expected_destination": "公司",
+                    "expected_purpose": "work",
+                    "probability": 0.90,
+                    "reason": "正在导航到公司，到达后将进入工作场景",
+                })
+            elif current_scene.destination == "家":
+                sequences.append({
+                    "next_scene": "arrive_at_home",
+                    "expected_destination": "家",
+                    "expected_purpose": "rest",
+                    "probability": 0.90,
+                    "reason": "正在导航回家，到达后将进入休息场景",
+                })
+
+        sequences.sort(key=lambda x: x["probability"], reverse=True)
+        return sequences
 
     def _parse_context_key(self, key: str) -> Optional[SceneContext]:
         """解析上下文键为 SceneContext 对象"""
